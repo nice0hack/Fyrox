@@ -142,6 +142,7 @@ use winit::{
     window::Icon,
     window::WindowAttributes,
 };
+use fyrox_graphics_wgpu::server::WgpuGraphicsServer;
 
 /// Serialization context holds runtime type information that allows to create unknown types using
 /// their UUIDs and a respective constructors.
@@ -1022,11 +1023,27 @@ pub type GraphicsServerConstructorCallback = dyn Fn(
 #[derive(Clone)]
 pub struct GraphicsServerConstructor(Rc<GraphicsServerConstructorCallback>);
 
+impl GraphicsServerConstructor {
+    pub fn wgpu() -> Self {
+        Self(Rc::new(
+            |params, window_target, window_builder, named_objects| {
+                WgpuGraphicsServer::new(
+                    params.vsync,
+                    params.msaa_sample_count,
+                    window_target,
+                    window_builder,
+                    named_objects,
+                )
+            },
+        ))
+    }
+}
+
 impl Default for GraphicsServerConstructor {
     fn default() -> Self {
         Self(Rc::new(
             |params, window_target, window_builder, named_objects| {
-                GlGraphicsServer::new(
+                WgpuGraphicsServer::new(
                     params.vsync,
                     params.msaa_sample_count,
                     window_target,

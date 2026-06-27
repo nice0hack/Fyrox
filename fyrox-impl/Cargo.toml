@@ -24,6 +24,7 @@ fyrox-animation = { path = "../fyrox-animation", version = "2.0.0-rc.1" }
 fyrox-graph = { path = "../fyrox-graph", version = "2.0.0-rc.1" }
 fyrox-graphics = { path = "../fyrox-graphics", version = "2.0.0-rc.1" }
 fyrox-graphics-gl = { path = "../fyrox-graphics-gl", version = "2.0.0-rc.1" }
+fyrox-graphics-wgpu = { path = "../fyrox-graphics-wgpu", version = "2.0.0-rc.1" }
 fyrox-texture = { path = "../fyrox-texture", version = "2.0.0-rc.1" }
 fyrox-autotile = { path = "../fyrox-autotile", version = "2.0.0-rc.1" }
 fyrox-material = { path = "../fyrox-material", version = "2.0.0-rc.1" }
