@@ -18,7 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use std::cell::{Cell, RefCell};
+use crate::buffer::WgpuBuffer;
+use crate::framebuffer::WgpuFrameBuffer;
+use crate::geometry_buffer::WgpuGeometryBuffer;
+use crate::program::{WgpuProgram, WgpuShader};
+use crate::query::WgpuQuery;
+use crate::read_buffer::WgpuAsyncReadBuffer;
+use crate::sampler::WgpuSampler;
+use crate::texture::WgpuTexture;
 use fyrox_core::futures::executor::block_on;
 use fyrox_graphics::buffer::{GpuBuffer, GpuBufferDescriptor};
 use fyrox_graphics::error::FrameworkError;
@@ -34,9 +41,10 @@ use fyrox_graphics::server::{
 };
 use fyrox_graphics::stats::PipelineStatistics;
 use fyrox_graphics::{PolygonFace, PolygonFillMode};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, RwLock};
-use raw_window_handle::HasDisplayHandle;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
@@ -51,6 +59,12 @@ pub struct WgpuGraphicsServer {
     pub state: Arc<WgpuState>,
     pub surface: wgpu::Surface<'static>,
     pub surface_config: RwLock<wgpu::SurfaceConfiguration>,
+    pub named_objects: bool,
+    pub msaa_sample_count: u32,
+    pub pipeline_cache: RefCell<HashMap<u64, wgpu::RenderPipeline>>,
+    weak_self: RefCell<Option<Weak<WgpuGraphicsServer>>>,
+    pub memory_usage: RefCell<ServerMemoryUsage>,
+    pipeline_statistics: RefCell<PipelineStatistics>,
 }
 
 impl WgpuGraphicsServer {
@@ -58,7 +72,7 @@ impl WgpuGraphicsServer {
         vsync: bool,
         msaa_sample_count: Option<u8>,
         window_target: &ActiveEventLoop,
-        mut window_attributes: WindowAttributes,
+        window_attributes: WindowAttributes,
         named_objects: bool,
     ) -> Result<(Window, SharedGraphicsServer), FrameworkError> {
         let window = window_target
@@ -66,18 +80,36 @@ impl WgpuGraphicsServer {
             .map_err(|e| FrameworkError::Custom(format!("Failed to create window: {e}")))?;
         let size = window.inner_size();
 
-        let display_handle = window_target
-            .display_handle()
-            .map_err(|e| FrameworkError::Custom(format!("Failed to get display handle: {e}")))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(window_target.owned_display_handle()),
+        ));
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window_target.owned_display_handle())));
+        #[cfg(target_arch = "wasm32")]
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::GL,
+            ..Default::default()
+        });
 
-        // Создаем поверхность отрисовки (Surface)
+        #[cfg(not(target_arch = "wasm32"))]
         let surface = unsafe {
             let target = wgpu::SurfaceTargetUnsafe::from_window(&window)
                 .map_err(|e| FrameworkError::Custom(format!("Failed to get window handle: {e}")))?;
             instance
                 .create_surface_unsafe(target)
+                .map_err(|e| FrameworkError::Custom(format!("Failed to create surface: {e}")))?
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let surface = {
+            use fyrox_core::wasm_bindgen::JsCast;
+            use winit::platform::web::WindowExtWebSys;
+            let canvas = window.canvas().unwrap();
+            let web_window = fyrox_core::web_sys::window().unwrap();
+            let document = web_window.document().unwrap();
+            let body = document.body().unwrap();
+            body.append_child(&canvas).expect("Append canvas to HTML body");
+            instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
                 .map_err(|e| FrameworkError::Custom(format!("Failed to create surface: {e}")))?
         };
 
@@ -88,190 +120,129 @@ impl WgpuGraphicsServer {
         }))
         .map_err(|e| FrameworkError::Custom(format!("No suitable WGPU adapter found: {e}")))?;
 
-        // Инициализируем логическое устройство и очередь команд
         let (device, queue) = block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
-                // WebGL doesn't support all of wgpu's features, so if
-                // we're building for the web we'll have to disable some.
                 required_limits: if cfg!(target_arch = "wasm32") {
                     wgpu::Limits::downlevel_webgl2_defaults()
                 } else {
                     wgpu::Limits::default()
                 },
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
+                ..Default::default()
             },
         ))
         .map_err(|e| FrameworkError::Custom(format!("Failed to request device: {e}")))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-
         let Some(surface_format) = surface_caps.formats.first().copied() else {
-            return Err(FrameworkError::Custom(
-                "Surface has no supported formats".into(),
-            ));
+            return Err(FrameworkError::Custom("Surface has no supported formats".into()));
         };
+
+        let present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-
         surface.configure(&device, &surface_config);
 
-        let state = Self {
-            state: Arc::new(WgpuState {
-                instance,
-                adapter,
-                device,
-                queue,
-            }),
+        let msaa = msaa_sample_count.unwrap_or(1).max(1) as u32;
+
+        let server = Rc::new(Self {
+            state: Arc::new(WgpuState { instance, adapter, device, queue }),
             surface,
             surface_config: RwLock::new(surface_config),
-        };
+            named_objects,
+            msaa_sample_count: msaa,
+            pipeline_cache: RefCell::new(HashMap::new()),
+            weak_self: RefCell::new(None),
+            memory_usage: RefCell::new(ServerMemoryUsage::default()),
+            pipeline_statistics: RefCell::new(PipelineStatistics::default()),
+        });
 
-        let shared = Rc::new(state);
+        *server.weak_self.borrow_mut() = Some(Rc::downgrade(&server));
 
-        Ok((window, shared))
+        Ok((window, server))
+    }
+
+    pub fn weak_ref(&self) -> Weak<WgpuGraphicsServer> {
+        self.weak_self.borrow().clone().unwrap()
     }
 }
 
 impl GraphicsServer for WgpuGraphicsServer {
     fn create_buffer(&self, desc: GpuBufferDescriptor) -> Result<GpuBuffer, FrameworkError> {
-        todo!()
+        Ok(GpuBuffer(Rc::new(WgpuBuffer::new(self, desc)?)))
     }
-
     fn create_texture(&self, desc: GpuTextureDescriptor) -> Result<GpuTexture, FrameworkError> {
-        todo!()
+        Ok(GpuTexture(Rc::new(WgpuTexture::new(self, desc)?)))
     }
-
     fn create_sampler(&self, desc: GpuSamplerDescriptor) -> Result<GpuSampler, FrameworkError> {
-        todo!()
+        Ok(GpuSampler(Rc::new(WgpuSampler::new(self, desc)?)))
     }
-
-    fn create_frame_buffer(
-        &self,
-        depth_attachment: Option<Attachment>,
-        color_attachments: Vec<Attachment>,
-    ) -> Result<GpuFrameBuffer, FrameworkError> {
-        todo!()
+    fn create_frame_buffer(&self, depth: Option<Attachment>, colors: Vec<Attachment>) -> Result<GpuFrameBuffer, FrameworkError> {
+        Ok(GpuFrameBuffer(Rc::new(WgpuFrameBuffer::new(self, depth, colors)?)))
     }
-
     fn back_buffer(&self) -> GpuFrameBuffer {
-        todo!()
+        GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self)))
     }
-
     fn create_query(&self) -> Result<GpuQuery, FrameworkError> {
-        todo!()
+        Ok(GpuQuery(Rc::new(WgpuQuery::new(self)?)))
     }
-
-    fn create_shader(
-        &self,
-        name: String,
-        kind: ShaderKind,
-        source: String,
-        resources: &[ShaderResourceDefinition],
-        line_offset: isize,
-    ) -> Result<GpuShader, FrameworkError> {
-        todo!()
+    fn create_shader(&self, name: String, kind: ShaderKind, source: String, resources: &[ShaderResourceDefinition], line_offset: isize) -> Result<GpuShader, FrameworkError> {
+        Ok(GpuShader(Rc::new(WgpuShader::new(self, name, kind, source, resources, line_offset)?)))
     }
-
-    fn create_program(
-        &self,
-        name: &str,
-        vertex_source: String,
-        vertex_source_line_offset: isize,
-        fragment_source: String,
-        fragment_source_line_offset: isize,
-        resources: &[ShaderResourceDefinition],
-    ) -> Result<GpuProgram, FrameworkError> {
-        todo!()
+    fn create_program(&self, name: &str, vs: String, vs_offset: isize, fs: String, fs_offset: isize, resources: &[ShaderResourceDefinition]) -> Result<GpuProgram, FrameworkError> {
+        Ok(GpuProgram(Rc::new(WgpuProgram::from_source(self, name, vs, vs_offset, fs, fs_offset, resources)?)))
     }
-
-    fn create_program_from_shaders(
-        &self,
-        name: &str,
-        vertex_shader: &GpuShader,
-        fragment_shader: &GpuShader,
-        resources: &[ShaderResourceDefinition],
-    ) -> Result<GpuProgram, FrameworkError> {
-        todo!()
+    fn create_program_from_shaders(&self, name: &str, vs: &GpuShader, fs: &GpuShader, resources: &[ShaderResourceDefinition]) -> Result<GpuProgram, FrameworkError> {
+        Ok(GpuProgram(Rc::new(WgpuProgram::from_shaders(self, name, vs, fs, resources)?)))
     }
-
-    fn create_async_read_buffer(
-        &self,
-        name: &str,
-        pixel_size: usize,
-        pixel_count: usize,
-    ) -> Result<GpuAsyncReadBuffer, FrameworkError> {
-        todo!()
+    fn create_async_read_buffer(&self, name: &str, pixel_size: usize, pixel_count: usize) -> Result<GpuAsyncReadBuffer, FrameworkError> {
+        Ok(GpuAsyncReadBuffer(Rc::new(WgpuAsyncReadBuffer::new(self, name, pixel_size, pixel_count)?)))
     }
-
-    fn create_geometry_buffer(
-        &self,
-        desc: GpuGeometryBufferDescriptor,
-    ) -> Result<GpuGeometryBuffer, FrameworkError> {
-        todo!()
+    fn create_geometry_buffer(&self, desc: GpuGeometryBufferDescriptor) -> Result<GpuGeometryBuffer, FrameworkError> {
+        Ok(GpuGeometryBuffer(Rc::new(WgpuGeometryBuffer::new(self, desc)?)))
     }
-
     fn weak(&self) -> Weak<dyn GraphicsServer> {
-        todo!()
+        self.weak_ref() as Weak<dyn GraphicsServer>
     }
-
-    fn flush(&self) {
-        todo!()
-    }
-
-    fn finish(&self) {
-        todo!()
-    }
-
-    fn invalidate_resource_bindings_cache(&self) {
-        todo!()
-    }
-
-    fn pipeline_statistics(&self) -> PipelineStatistics {
-        todo!()
-    }
-
-    fn swap_buffers(&self) -> Result<(), FrameworkError> {
-        todo!()
-    }
-
+    fn flush(&self) { self.state.queue.submit(std::iter::empty()); }
+    fn finish(&self) { self.state.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok(); }
+    fn invalidate_resource_bindings_cache(&self) { *self.pipeline_statistics.borrow_mut() = Default::default(); }
+    fn pipeline_statistics(&self) -> PipelineStatistics { *self.pipeline_statistics.borrow() }
+    fn swap_buffers(&self) -> Result<(), FrameworkError> { Ok(()) }
     fn set_frame_size(&self, new_size: (u32, u32)) {
-        todo!()
+        if new_size.0 > 0 && new_size.1 > 0 {
+            let mut config = self.surface_config.write().unwrap();
+            config.width = new_size.0;
+            config.height = new_size.1;
+            self.surface.configure(&self.state.device, &config);
+        }
     }
-
     fn capabilities(&self) -> ServerCapabilities {
-        todo!()
+        let limits = self.state.device.limits();
+        ServerCapabilities {
+            max_uniform_block_size: limits.max_uniform_buffer_binding_size as usize,
+            uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment as usize,
+            max_lod_bias: 16.0,
+        }
     }
-
-    fn set_polygon_fill_mode(&self, polygon_face: PolygonFace, polygon_fill_mode: PolygonFillMode) {
-        todo!()
+    fn set_polygon_fill_mode(&self, _face: PolygonFace, _mode: PolygonFillMode) {
+        log::warn!("set_polygon_fill_mode: wgpu requires pipeline recreation");
     }
-
-    fn generate_mipmap(&self, texture: &GpuTexture) {
-        todo!()
+    fn generate_mipmap(&self, _texture: &GpuTexture) {
+        log::warn!("generate_mipmap: not yet fully implemented");
     }
-
-    fn memory_usage(&self) -> ServerMemoryUsage {
-        todo!()
-    }
-
-    fn push_debug_group(&self, name: &str) {
-        todo!()
-    }
-
-    fn pop_debug_group(&self) {
-        todo!()
-    }
+    fn memory_usage(&self) -> ServerMemoryUsage { self.memory_usage.borrow().clone() }
+    fn push_debug_group(&self, _name: &str) {}
+    fn pop_debug_group(&self) {}
 }

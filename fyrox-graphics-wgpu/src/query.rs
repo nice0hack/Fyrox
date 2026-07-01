@@ -18,12 +18,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-pub mod buffer;
-pub mod framebuffer;
-pub mod geometry_buffer;
-pub mod program;
-pub mod query;
-pub mod read_buffer;
-pub mod sampler;
-pub mod server;
-pub mod texture;
+use crate::server::WgpuGraphicsServer;
+use fyrox_graphics::{
+    error::FrameworkError,
+    query::{GpuQueryTrait, QueryKind, QueryResult},
+};
+use std::cell::Cell;
+use std::fmt::Debug;
+use std::rc::Weak;
+
+pub struct WgpuQuery {
+    _server: Weak<WgpuGraphicsServer>,
+    active: Cell<bool>,
+}
+
+impl Debug for WgpuQuery { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("WgpuQuery").field("active", &self.active.get()).finish() } }
+
+impl WgpuQuery {
+    pub fn new(server: &WgpuGraphicsServer) -> Result<Self, FrameworkError> {
+        Ok(Self { _server: server.weak_ref(), active: Cell::new(false) })
+    }
+}
+
+impl GpuQueryTrait for WgpuQuery {
+    fn begin(&self, _kind: QueryKind) { self.active.set(true); }
+    fn end(&self) { self.active.set(false); }
+    fn is_started(&self) -> bool { self.active.get() }
+    fn try_get_result(&self) -> Option<QueryResult> { Some(QueryResult::SamplesPassed(u32::MAX)) }
+}
