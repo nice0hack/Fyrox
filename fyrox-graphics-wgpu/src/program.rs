@@ -56,6 +56,200 @@ fn sampler_constructor_name(kind: SamplerKind) -> &'static str {
     }
 }
 
+/// Maps a combined sampler type name to SamplerKind.
+fn sampler_kind_from_type_name(type_name: &str) -> Option<SamplerKind> {
+    match type_name {
+        "sampler1D" => Some(SamplerKind::Sampler1D),
+        "sampler2D" => Some(SamplerKind::Sampler2D),
+        "sampler3D" => Some(SamplerKind::Sampler3D),
+        "samplerCube" => Some(SamplerKind::SamplerCube),
+        "usampler1D" => Some(SamplerKind::USampler1D),
+        "usampler2D" => Some(SamplerKind::USampler2D),
+        "usampler3D" => Some(SamplerKind::USampler3D),
+        "usamplerCube" => Some(SamplerKind::USamplerCube),
+        _ => None,
+    }
+}
+
+/// Rewrites texture function calls, textureSize calls, and shared function argument
+/// splitting for a given sampler name. Used for both global texture resources and
+/// local function parameters.
+fn rewrite_sampler_usages(source: &mut String, name: &str, kind: SamplerKind) {
+    let constructor = sampler_constructor_name(kind);
+    let sampler_expr = format!("{constructor}({name}_tex, {name}_samp)");
+
+    // Transform texture functions: texture(name, ...) → texture(samplerXxx(name_tex, name_samp), ...)
+    for func_name in &["texture", "textureLod", "textureGrad", "textureOffset", "textureLodOffset",
+                       "texelFetch", "texelFetchOffset", "textureProj", "textureProjLod"] {
+        for pattern in &[
+            format!("{func_name}({name},"),
+            format!("{func_name}({name} ,"),
+            format!("{func_name}( {name},"),
+        ] {
+            *source = source.replace(pattern, &format!("{func_name}({sampler_expr},"));
+        }
+    }
+
+    // textureSize takes the raw texture (not sampler)
+    for pattern in &[
+        format!("textureSize({name},"),
+        format!("textureSize({name} ,"),
+    ] {
+        *source = source.replace(pattern, &format!("textureSize({name}_tex,"));
+    }
+
+    // Replace shared function calls that pass texture names as arguments.
+    // These functions (in shared.glsl) take separate texture2D + sampler parameters.
+    for func_name in &[
+        "S_PointShadow", "S_SpotShadowFactor",
+        "S_ComputeParallaxTextureCoordinates", "S_FetchMatrix", "S_FetchBlendShapeOffsets",
+        "Internal_FetchHeight", "CsmGetShadow",
+    ] {
+        replace_texture_arg_in_calls(source, func_name, name);
+    }
+}
+
+/// Rewrites local function definitions that have combined sampler parameters
+/// (e.g. `in sampler2D name`) into Vulkan-compatible signatures with separate
+/// `texture2D` + `sampler` parameters. Also rewrites the function body to use
+/// the new parameter names.
+fn rewrite_sampler_function_definitions(source: &mut String) {
+    let sampler_type_keywords = [
+        "sampler1D", "sampler2D", "sampler3D", "samplerCube",
+        "usampler1D", "usampler2D", "usampler3D", "usamplerCube",
+    ];
+
+    // Phase 1: Find all function definitions with sampler params.
+    // Store (paren_pos, body_close_brace_pos, vec<(param_name, SamplerKind)>).
+    let mut regions: Vec<(usize, usize, Vec<(String, SamplerKind)>)> = Vec::new();
+
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            // Check there's an identifier immediately before '(' (function name).
+            let paren_pos = i;
+            let mut j = paren_pos;
+            while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
+                j -= 1;
+            }
+            if j == paren_pos {
+                // No identifier before '('
+                i += 1;
+                continue;
+            }
+
+            // Extract parameter list.
+            let Some((args_str, after_paren)) = extract_call_args(source, paren_pos) else {
+                i += 1;
+                continue;
+            };
+
+            // Check if this looks like a function definition (followed by '{', possibly with whitespace).
+            let rest = source[after_paren..].trim_start();
+            if !rest.starts_with('{') {
+                i += 1;
+                continue;
+            }
+
+            // Parse parameters and find sampler types.
+            let mut sampler_params: Vec<(String, SamplerKind)> = Vec::new();
+            for param in args_str.split(',') {
+                let param = param.trim();
+                let tokens: Vec<&str> = param.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    continue;
+                }
+                let mut type_idx = None;
+                for (idx, tok) in tokens.iter().enumerate() {
+                    if sampler_type_keywords.contains(tok) {
+                        type_idx = Some(idx);
+                        break;
+                    }
+                }
+                let Some(ti) = type_idx else { continue };
+                let kind = sampler_kind_from_type_name(tokens[ti]).unwrap();
+                let param_name = tokens.last().unwrap().to_string();
+                sampler_params.push((param_name, kind));
+            }
+
+            if !sampler_params.is_empty() {
+                // Find the function body via brace matching.
+                let brace_start = source[after_paren..].find('{').unwrap() + after_paren;
+                let mut depth = 0i32;
+                let mut k = brace_start;
+                while k < bytes.len() {
+                    match bytes[k] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 { break; }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if depth == 0 {
+                    regions.push((paren_pos, k + 1, sampler_params));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Phase 2: Apply rewrites from end to start to avoid position shifts.
+    for (paren_pos, body_end, sampler_params) in regions.iter().rev() {
+        // Extract parameter list text.
+        let Some((args_str, after_paren)) = extract_call_args(source, *paren_pos) else { continue };
+
+        // Rewrite parameter list: split each sampler param into _tex + _samp.
+        let mut new_params: Vec<String> = Vec::new();
+        for param in args_str.split(',') {
+            let trimmed = param.trim();
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() < 2 {
+                new_params.push(param.to_string());
+                continue;
+            }
+            let mut type_idx = None;
+            for (idx, tok) in tokens.iter().enumerate() {
+                if sampler_type_keywords.contains(tok) {
+                    type_idx = Some(idx);
+                    break;
+                }
+            }
+            if let Some(ti) = type_idx {
+                let kind = sampler_kind_from_type_name(tokens[ti]).unwrap();
+                let param_name = tokens.last().unwrap();
+                // Collect qualifiers (everything before the type keyword).
+                let qualifiers: Vec<&str> = tokens[..ti].to_vec();
+                let qual_prefix = if qualifiers.is_empty() { String::new() } else { qualifiers.join(" ") + " " };
+                let tex_type = vulkan_texture_type(kind);
+                new_params.push(format!("{qual_prefix}{tex_type} {param_name}_tex"));
+                new_params.push(format!("{qual_prefix}sampler {param_name}_samp"));
+            } else {
+                new_params.push(param.to_string());
+            }
+        }
+        let new_args = new_params.join(", ");
+
+        // Find the body text (from '{' to '}').
+        let brace_start = source[after_paren..].find('{').unwrap() + after_paren;
+        let body_text = &source[brace_start..*body_end].to_string();
+
+        // Rewrite body for each sampler param.
+        let mut new_body = body_text.clone();
+        for (param_name, kind) in sampler_params {
+            rewrite_sampler_usages(&mut new_body, param_name, *kind);
+        }
+
+        // Replace: from paren_pos to body_end.
+        let before = &source[..*paren_pos].to_string();
+        let after = &source[*body_end..].to_string();
+        *source = format!("{before}({new_args}){new_body}{after}");
+    }
+}
+
 /// Generates separate texture + sampler uniform declarations for wgpu bindings,
 /// plus uniform block declarations with `layout(std140, binding=...)`.
 fn generate_resource_declarations(resources: &[ShaderResourceDefinition], source: &mut String, line_offset: &mut isize) {
@@ -109,12 +303,16 @@ fn generate_resource_declarations(resources: &[ShaderResourceDefinition], source
 /// Preprocesses shader source for naga/wgpu compatibility.
 ///
 /// Transformations:
-/// 1. `texture(name, uv)` → `texture(samplerXxx(name_tex, name_samp), uv)` for all texture functions
-/// 2. `textureSize(name, ...)` → `textureSize(name_tex, ...)`
-/// 3. `gl_InstanceID` → `gl_InstanceIndex`, `gl_VertexID` → `gl_VertexIndex`
-/// 4. `properties.boolField` → `bool(properties.boolField)` (uint→bool cast)
-/// 5. Shared function calls with texture args: `S_PointShadow(..., name)` → `S_PointShadow(..., name_tex, name_samp)`
+/// 1. Local function definitions with sampler params → separate texture + sampler params
+/// 2. `texture(name, uv)` → `texture(samplerXxx(name_tex, name_samp), uv)` for all texture functions
+/// 3. `textureSize(name, ...)` → `textureSize(name_tex, ...)`
+/// 4. Shared function calls with texture args: `S_PointShadow(..., name)` → `S_PointShadow(..., name_tex, name_samp)`
+/// 5. `gl_InstanceID` → `gl_InstanceIndex`, `gl_VertexID` → `gl_VertexIndex`
+/// 6. `properties.boolField` → `bool(properties.boolField)` (uint→bool cast)
 fn preprocess_shader(source: &mut String, resources: &[ShaderResourceDefinition]) {
+    // Rewrite local function definitions with sampler params first.
+    rewrite_sampler_function_definitions(source);
+
     // Collect texture resources (longest first to avoid partial matches)
     let mut tex_resources: Vec<(&str, SamplerKind)> = resources
         .iter()
@@ -126,44 +324,15 @@ fn preprocess_shader(source: &mut String, resources: &[ShaderResourceDefinition]
     tex_resources.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     for (name, kind) in &tex_resources {
-        let constructor = sampler_constructor_name(*kind);
-        let sampler_expr = format!("{constructor}({name}_tex, {name}_samp)");
-
-        // Transform texture functions: texture(name, ...) → texture(samplerXxx(name_tex, name_samp), ...)
-        for func_name in &["texture", "textureLod", "textureGrad", "textureOffset", "textureLodOffset",
-                           "texelFetch", "texelFetchOffset", "textureProj", "textureProjLod"] {
-            for pattern in &[
-                format!("{func_name}({name},"),
-                format!("{func_name}({name} ,"),
-                format!("{func_name}( {name},"),
-            ] {
-                *source = source.replace(pattern, &format!("{func_name}({sampler_expr},"));
-            }
-        }
-
-        // textureSize takes the raw texture (not sampler)
-        for pattern in &[
-            format!("textureSize({name},"),
-            format!("textureSize({name} ,"),
-        ] {
-            *source = source.replace(pattern, &format!("textureSize({name}_tex,"));
-        }
-
-        // Replace shared function calls that pass texture resource names as arguments.
-        // These functions (in shared.glsl) take separate texture2D + sampler parameters.
-        // The call site passes the combined name; we split it into _tex and _samp.
-        for func_name in &[
-            "S_PointShadow", "S_SpotShadowFactor",
-            "S_ComputeParallaxTextureCoordinates", "S_FetchMatrix", "S_FetchBlendShapeOffsets",
-            "Internal_FetchHeight", "CsmGetShadow",
-        ] {
-            replace_texture_arg_in_calls(source, func_name, name);
-        }
+        rewrite_sampler_usages(source, name, *kind);
     }
 
-    // Replace OpenGL built-in names with Vulkan equivalents
-    *source = source.replace("gl_InstanceID", "gl_InstanceIndex");
-    *source = source.replace("gl_VertexID", "gl_VertexIndex");
+    // Replace OpenGL built-in names with Vulkan equivalents.
+    // Use `int(builtin + 0)` wrapper to work around a Naga bug where passing
+    // gl_InstanceIndex/gl_VertexIndex directly as function arguments to functions
+    // with texture2D/sampler parameters causes "Unknown function" errors.
+    *source = source.replace("gl_InstanceID", "int(gl_InstanceIndex + 0)");
+    *source = source.replace("gl_VertexID", "int(gl_VertexIndex + 0)");
 
     // Wrap bool uniform property accesses with bool() cast (uint→bool)
     for res in resources {
@@ -442,4 +611,98 @@ impl WgpuProgram {
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout { &self.bind_group_layout }
     pub fn resources(&self) -> &[ShaderResourceDefinition] { &self.resources }
     pub fn name(&self) -> &str { &self.name }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rewrite_sampler_function_definitions() {
+        let mut source = r#"float CsmGetShadow(in sampler2D shadowSampler, in vec3 fragmentPosition, in mat4 lightViewProjMatrix)
+{
+    float invSize = 1.0 / float(textureSize(shadowSampler, 0).x);
+    return S_SpotShadowFactor(properties.shadowsEnabled, properties.softShadows,
+        properties.shadowBias, fragmentPosition, lightViewProjMatrix, invSize, shadowSampler);
+}"#.to_string();
+
+        rewrite_sampler_function_definitions(&mut source);
+
+        // Parameter list should be split
+        assert!(source.contains("in texture2D shadowSampler_tex, in sampler shadowSampler_samp"));
+        // textureSize should use _tex
+        assert!(source.contains("textureSize(shadowSampler_tex, 0)"));
+        // S_SpotShadowFactor call should have split args
+        assert!(source.contains("shadowSampler_tex, shadowSampler_samp"));
+        // Original combined sampler type should be gone
+        assert!(!source.contains("sampler2D shadowSampler"));
+    }
+
+    #[test]
+    fn test_rewrite_sampler_function_definitions_no_sampler() {
+        let mut source = r#"float plainFunc(float a, float b) {
+    return a + b;
+}"#.to_string();
+
+        let original = source.clone();
+        rewrite_sampler_function_definitions(&mut source);
+        assert_eq!(source, original);
+    }
+
+    #[test]
+    fn test_rewrite_sampler_usages_global_resource() {
+        let mut source = r#"vec3 c = texture(materialTexture, texCoord).rgb;
+float d = textureSize(materialTexture, 0).x;"#.to_string();
+
+        rewrite_sampler_usages(&mut source, "materialTexture", SamplerKind::Sampler2D);
+
+        assert!(source.contains("texture(sampler2D(materialTexture_tex, materialTexture_samp),"));
+        assert!(source.contains("textureSize(materialTexture_tex,"));
+    }
+
+    #[test]
+    fn test_naga_shared_glsl_std140_with_gl_instance_index() {
+        // Verify that the gl_InstanceIndex workaround (int(gl_InstanceIndex + 0))
+        // works around the Naga bug where gl_InstanceIndex as a function argument
+        // to functions with texture2D/sampler params causes "Unknown function" errors.
+        let shared = include_str!("shaders/shared.glsl");
+        let glsl = format!(r#"#version 450
+{shared}
+
+// end of include
+layout(binding=0) uniform texture2D matrices_tex;
+layout(binding=100) uniform sampler matrices_samp;
+
+struct Tproperties{{
+    mat4 viewProjection;
+    int tileSize;
+    float frameBufferHeight;
+}};
+layout(std140, binding=200) uniform Uproperties {{ Tproperties properties; }};
+
+void main()
+{{
+    gl_Position = S_FetchMatrix(matrices_tex, matrices_samp, int(gl_InstanceIndex + 0)) * vec4(1.0);
+}}
+"#);
+
+        let mut frontend = naga::front::glsl::Frontend::default();
+        let result = frontend.parse(&naga::front::glsl::Options {
+            stage: naga::ShaderStage::Vertex,
+            defines: Default::default(),
+        }, &glsl);
+
+        match result {
+            Ok(module) => {
+                let info = naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::empty(),
+                    naga::valid::Capabilities::all(),
+                ).validate(&module);
+                assert!(info.is_ok(), "Naga validation failed: {:?}", info.err());
+            }
+            Err(errors) => {
+                panic!("Naga GLSL parse failed:\n{errors}");
+            }
+        }
+    }
 }
