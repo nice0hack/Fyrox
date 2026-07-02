@@ -70,7 +70,7 @@ pub struct WgpuGraphicsServer {
 impl WgpuGraphicsServer {
     pub fn new(
         vsync: bool,
-        msaa_sample_count: Option<u8>,
+        _msaa_sample_count: Option<u8>,
         window_target: &ActiveEventLoop,
         window_attributes: WindowAttributes,
         named_objects: bool,
@@ -154,7 +154,8 @@ impl WgpuGraphicsServer {
         };
         surface.configure(&device, &surface_config);
 
-        let msaa = msaa_sample_count.unwrap_or(1).max(1) as u32;
+        // TODO: Force `msaa_sample_count` to 1 in the wgpu backend. Full MSAA support requires creating multisampled render targets and resolve targets, which is a larger feature.
+        let msaa = 1u32; // msaa_sample_count.unwrap_or(1).max(1) as u32;
 
         let server = Rc::new(Self {
             state: Arc::new(WgpuState { instance, adapter, device, queue }),

@@ -124,6 +124,9 @@ pub struct WgpuTexture {
     server: Weak<WgpuGraphicsServer>,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    /// Separate view with DepthOnly aspect for shader bindings of depth-stencil textures.
+    /// For non-depth-stencil textures, this is the same as `view`.
+    binding_view: wgpu::TextureView,
     kind: Cell<GpuTextureKind>,
     pixel_kind: Cell<PixelKind>,
     size_bytes: Cell<usize>,
@@ -148,14 +151,34 @@ impl WgpuTexture {
         });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
-            label: None, format: Some(format), dimension: Some(texture_view_dimension(desc.kind)), ..Default::default()
+            label: None,
+            format: None,
+            dimension: Some(texture_view_dimension(desc.kind)),
+            aspect: wgpu::TextureAspect::All,
+            ..Default::default()
         });
+
+        // For depth-stencil textures, create a separate view with DepthOnly aspect
+        // for shader bindings. wgpu rejects Depth+Stencil aspect on texture bindings.
+        let binding_view = match format {
+            wgpu::TextureFormat::Depth24PlusStencil8
+            | wgpu::TextureFormat::Depth32FloatStencil8 => {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: None,
+                    format: None,
+                    dimension: Some(texture_view_dimension(desc.kind)),
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                    ..Default::default()
+                })
+            }
+            _ => view.clone(),
+        };
 
         let size_bytes = calc_size_bytes(desc.kind, desc.pixel_kind, desc.mip_count);
         if let Some(data) = desc.data { Self::upload(&server.state.queue, &texture, desc.kind, desc.pixel_kind, data, desc.mip_count)?; }
         server.memory_usage.borrow_mut().textures += size_bytes;
 
-        Ok(Self { server: server.weak_ref(), texture, view, kind: Cell::new(desc.kind), pixel_kind: Cell::new(desc.pixel_kind), size_bytes: Cell::new(size_bytes) })
+        Ok(Self { server: server.weak_ref(), texture, view, binding_view, kind: Cell::new(desc.kind), pixel_kind: Cell::new(desc.pixel_kind), size_bytes: Cell::new(size_bytes) })
     }
 
     fn upload(queue: &wgpu::Queue, texture: &wgpu::Texture, kind: GpuTextureKind, pk: PixelKind, data: &[u8], mip_count: usize) -> Result<(), FrameworkError> {
@@ -226,6 +249,8 @@ impl WgpuTexture {
 
     pub fn wgpu_texture(&self) -> &wgpu::Texture { &self.texture }
     pub fn wgpu_view(&self) -> &wgpu::TextureView { &self.view }
+    /// Returns a view suitable for shader bindings (DepthOnly for depth-stencil textures).
+    pub fn wgpu_binding_view(&self) -> &wgpu::TextureView { &self.binding_view }
     pub fn format(&self) -> wgpu::TextureFormat { self.texture.format() }
 }
 

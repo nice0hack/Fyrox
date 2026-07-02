@@ -273,7 +273,7 @@ fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups:
                 ResourceBinding::Texture { texture, sampler, binding: loc } => {
                     let wt = texture.as_any().downcast_ref::<WgpuTexture>()?;
                     let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
-                    entries.push(wgpu::BindGroupEntry { binding: *loc as u32, resource: wgpu::BindingResource::TextureView(wt.wgpu_view()) });
+                    entries.push(wgpu::BindGroupEntry { binding: *loc as u32, resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()) });
                     entries.push(wgpu::BindGroupEntry { binding: (*loc + 100) as u32, resource: wgpu::BindingResource::Sampler(ws.wgpu_sampler()) });
                 }
                 ResourceBinding::Buffer { buffer, binding: loc, data_usage } => {
