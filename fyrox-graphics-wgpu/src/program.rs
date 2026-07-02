@@ -571,6 +571,129 @@ fn is_unqualified_in_decl(line: &str) -> bool {
     tokens.len() >= 3
 }
 
+/// Handles vertex input declarations that may not be provided by the vertex buffer.
+///
+/// For inputs at high locations (4+) that are commonly optional (boneWeights,
+/// boneIndices, vertexSecondTexCoord), replaces the `layout(location = N) in TYPE name;`
+/// declaration with `const TYPE name = DEFAULT;`. This allows the shader to compile
+/// and run correctly even when the vertex buffer doesn't provide these attributes.
+///
+/// Inputs at low locations (0-3) that are truly unused are stripped entirely.
+fn strip_unused_vertex_inputs(source: &mut String) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut modifications: Vec<(usize, String)> = Vec::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Match: layout (location = N) in TYPE name;
+        if !trimmed.contains("layout") || !trimmed.contains(" in ") || !trimmed.ends_with(';') {
+            continue;
+        }
+        if !trimmed.contains("location") {
+            continue;
+        }
+
+        // Extract the variable name and type
+        let without_semi = trimmed.trim_end_matches(';');
+        let tokens: Vec<&str> = without_semi.split_whitespace().collect();
+        if tokens.len() < 4 {
+            continue;
+        }
+
+        let var_name = tokens.last().unwrap();
+
+        // Extract location number
+        let loc = extract_location_number(trimmed);
+
+        // Check if the variable name appears anywhere else in the source
+        let mut used = false;
+        for (j, other_line) in lines.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            if contains_word(other_line, var_name) {
+                used = true;
+                break;
+            }
+        }
+
+        if !used {
+            // Truly unused — strip the line entirely
+            modifications.push((i, String::new()));
+        } else if loc.map_or(false, |l| l >= 4) {
+            // Used but at a high location (commonly optional attributes like boneWeights).
+            // Replace with a constant default so the shader compiles without the vertex attribute.
+            let type_name = tokens[tokens.len() - 2];
+            let default_val = match type_name {
+                "vec4" => "vec4(0.0)",
+                "vec3" => "vec3(0.0)",
+                "vec2" => "vec2(0.0)",
+                "float" => "0.0",
+                "int" => "0",
+                "uint" => "0u",
+                _ => continue, // Unknown type, don't modify
+            };
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            modifications.push((i, format!("{indent}const {type_name} {var_name} = {default_val};")));
+        }
+    }
+
+    if modifications.is_empty() {
+        return;
+    }
+
+    let mut result = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((_, replacement)) = modifications.iter().find(|(idx, _)| *idx == i) {
+            if replacement.is_empty() {
+                continue; // Strip the line
+            }
+            result.push_str(replacement);
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    *source = result;
+}
+
+/// Extracts the location number from a layout declaration line.
+fn extract_location_number(line: &str) -> Option<i32> {
+    let loc_pos = line.find("location")?;
+    let after_loc = &line[loc_pos + "location".len()..];
+    let eq_pos = after_loc.find('=')?;
+    let after_eq = after_loc[eq_pos + 1..].trim();
+    let num_str: String = after_eq.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    num_str.parse().ok()
+}
+
+/// Checks if a line contains `word` as a standalone identifier (not part of a larger word).
+fn contains_word(line: &str, word: &str) -> bool {
+    let mut pos = 0;
+    while let Some(found) = line[pos..].find(word) {
+        let abs_pos = pos + found;
+        let before_ok = abs_pos == 0 || {
+            let prev = line.as_bytes()[abs_pos - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        let after_pos = abs_pos + word.len();
+        let after_ok = after_pos >= line.len() || {
+            let next = line.as_bytes()[after_pos];
+            !next.is_ascii_alphanumeric() && next != b'_'
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        pos = abs_pos + 1;
+    }
+    false
+}
+
 fn compile_glsl(device: &wgpu::Device, name: &str, kind: &ShaderKind, glsl: &str) -> Result<wgpu::ShaderModule, FrameworkError> {
     let mut frontend = naga::front::glsl::Frontend::default();
     let module = frontend.parse(&naga::front::glsl::Options { stage: naga_stage(kind), defines: Default::default() }, glsl).map_err(|errors| {
@@ -656,7 +779,10 @@ impl WgpuShader {
         generate_resource_declarations(resources, &mut source, &mut line_offset);
         preprocess_shader(&mut source, resources);
         assign_inter_stage_locations(&mut source, &kind);
-        let full = prepare_source(&source);
+        let mut full = prepare_source(&source);
+        if matches!(kind, ShaderKind::Vertex) {
+            strip_unused_vertex_inputs(&mut full);
+        }
         let module = compile_glsl(&server.state.device, &name, &kind, &full)?;
         Ok(Self { _server: server.weak_ref(), module, _kind: kind })
     }
@@ -920,5 +1046,52 @@ void main() { fragColor = vec4(1.0); }
         let original = source.clone();
         assign_inter_stage_locations(&mut source, &ShaderKind::Vertex);
         assert_eq!(source, original);
+    }
+
+    #[test]
+    fn test_strip_unused_vertex_inputs() {
+        let mut source = r#"layout (location = 0) in vec3 vertexPosition;
+layout (location = 1) in vec2 vertexTexCoord;
+layout (location = 4) in vec4 boneWeights;
+layout (location = 5) in vec4 boneIndices;
+
+void main()
+{
+    gl_Position = vec4(vertexPosition, 1.0);
+    vec2 tc = vertexTexCoord;
+}
+"#.to_string();
+
+        strip_unused_vertex_inputs(&mut source);
+
+        // vertexPosition and vertexTexCoord are used — keep them
+        assert!(source.contains("in vec3 vertexPosition"));
+        assert!(source.contains("in vec2 vertexTexCoord"));
+        // boneWeights and boneIndices are NOT used — strip them
+        assert!(!source.contains("boneWeights"));
+        assert!(!source.contains("boneIndices"));
+    }
+
+    #[test]
+    fn test_strip_unused_vertex_inputs_replaces_high_location_used() {
+        // boneWeights is used (inside an animation block) but at location 4+
+        // Should be replaced with a constant default
+        let mut source = r#"layout (location = 0) in vec3 vertexPosition;
+layout (location = 4) in vec4 boneWeights;
+
+void main()
+{
+    vec3 pos = vertexPosition + boneWeights.xyz;
+    gl_Position = vec4(pos, 1.0);
+}
+"#.to_string();
+
+        strip_unused_vertex_inputs(&mut source);
+
+        // vertexPosition is used at low location — keep as input
+        assert!(source.contains("in vec3 vertexPosition"));
+        // boneWeights is used at location 4 — replace with constant
+        assert!(source.contains("const vec4 boneWeights = vec4(0.0);"));
+        assert!(!source.contains("in vec4 boneWeights"));
     }
 }
