@@ -50,6 +50,50 @@ fn pixel_kind_to_wgpu_format(kind: PixelKind) -> wgpu::TextureFormat {
     }
 }
 
+/// Returns true if the pixel kind is 3-component and needs expansion to 4-component
+/// for wgpu compatibility (wgpu has no 3-component texture formats).
+fn needs_rgba_expansion(pk: PixelKind) -> bool {
+    matches!(pk, PixelKind::RGB8 | PixelKind::BGR8 | PixelKind::SRGB8
+               | PixelKind::RGB16F | PixelKind::RGB32F)
+}
+
+/// Expands 3-component pixel data to 4-component by adding an opaque alpha channel.
+fn expand_to_rgba(pk: PixelKind, data: &[u8]) -> Vec<u8> {
+    match pk {
+        PixelKind::RGB8 | PixelKind::SRGB8 | PixelKind::BGR8 => {
+            // 3 bytes → 4 bytes per pixel (add 0xFF alpha)
+            let pixel_count = data.len() / 3;
+            let mut out = Vec::with_capacity(pixel_count * 4);
+            for chunk in data.chunks(3) {
+                out.extend_from_slice(chunk);
+                out.push(0xFF);
+            }
+            out
+        }
+        PixelKind::RGB16F => {
+            // 6 bytes → 8 bytes per pixel (add 1.0f16 = 0x3C00 as alpha)
+            let pixel_count = data.len() / 6;
+            let mut out = Vec::with_capacity(pixel_count * 8);
+            for chunk in data.chunks(6) {
+                out.extend_from_slice(chunk);
+                out.extend_from_slice(&[0x00, 0x3C]);
+            }
+            out
+        }
+        PixelKind::RGB32F => {
+            // 12 bytes → 16 bytes per pixel (add 1.0f32 = 0x3F800000 as alpha)
+            let pixel_count = data.len() / 12;
+            let mut out = Vec::with_capacity(pixel_count * 16);
+            for chunk in data.chunks(12) {
+                out.extend_from_slice(chunk);
+                out.extend_from_slice(&[0x00, 0x00, 0x80, 0x3F]);
+            }
+            out
+        }
+        _ => data.to_vec(),
+    }
+}
+
 fn texture_dimension(kind: GpuTextureKind) -> wgpu::TextureDimension {
     match kind {
         GpuTextureKind::Line { .. } => wgpu::TextureDimension::D1,
@@ -116,6 +160,7 @@ impl WgpuTexture {
 
     fn upload(queue: &wgpu::Queue, texture: &wgpu::Texture, kind: GpuTextureKind, pk: PixelKind, data: &[u8], mip_count: usize) -> Result<(), FrameworkError> {
         let mip_count = mip_count.max(1);
+        let needs_expansion = needs_rgba_expansion(pk);
         let mut offset = 0;
         for mip in 0..mip_count {
             match kind {
@@ -123,7 +168,12 @@ impl WgpuTexture {
                     if let Some(l) = length.checked_shr(mip as u32) {
                         let sz = image_1d_size_bytes(pk, l);
                         if offset + sz > data.len() { break; }
-                        queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, &data[offset..offset+sz], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(sz as u32), rows_per_image: Some(1) }, wgpu::Extent3d { width: l as u32, height: 1, depth_or_array_layers: 1 });
+                        let slice = &data[offset..offset+sz];
+                        let expanded;
+                        let upload_data = if needs_expansion { expanded = expand_to_rgba(pk, slice); &expanded } else { slice };
+                        let fmt = pixel_kind_to_wgpu_format(pk);
+                        let bps = fmt.block_copy_size(None).unwrap_or(4);
+                        queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, upload_data, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(l as u32 * bps), rows_per_image: Some(1) }, wgpu::Extent3d { width: l as u32, height: 1, depth_or_array_layers: 1 });
                         offset += sz;
                     }
                 }
@@ -131,9 +181,12 @@ impl WgpuTexture {
                     if let (Some(w), Some(h)) = (width.checked_shr(mip as u32), height.checked_shr(mip as u32)) {
                         let sz = image_2d_size_bytes(pk, w, h);
                         if offset + sz > data.len() { break; }
+                        let slice = &data[offset..offset+sz];
+                        let expanded;
+                        let upload_data = if needs_expansion { expanded = expand_to_rgba(pk, slice); &expanded } else { slice };
                         let fmt = pixel_kind_to_wgpu_format(pk);
                         let bps = fmt.block_copy_size(None).unwrap_or(4);
-                        queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, &data[offset..offset+sz], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((w as u32 * bps).max(1)), rows_per_image: Some(h as u32) }, wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 });
+                        queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, upload_data, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((w as u32 * bps).max(1)), rows_per_image: Some(h as u32) }, wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 });
                         offset += sz;
                     }
                 }
@@ -143,9 +196,12 @@ impl WgpuTexture {
                         for face in 0..6u32 {
                             let fo = offset + (face as usize) * bpf;
                             if fo + bpf > data.len() { break; }
+                            let slice = &data[fo..fo+bpf];
+                            let expanded;
+                            let upload_data = if needs_expansion { expanded = expand_to_rgba(pk, slice); &expanded } else { slice };
                             let fmt = pixel_kind_to_wgpu_format(pk);
                             let bps = fmt.block_copy_size(None).unwrap_or(4);
-                            queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d { x: 0, y: 0, z: face }, aspect: wgpu::TextureAspect::All }, &data[fo..fo+bpf], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((s as u32 * bps).max(1)), rows_per_image: Some(s as u32) }, wgpu::Extent3d { width: s as u32, height: s as u32, depth_or_array_layers: 1 });
+                            queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d { x: 0, y: 0, z: face }, aspect: wgpu::TextureAspect::All }, upload_data, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((s as u32 * bps).max(1)), rows_per_image: Some(s as u32) }, wgpu::Extent3d { width: s as u32, height: s as u32, depth_or_array_layers: 1 });
                         }
                         offset += 6 * bpf;
                     }
@@ -154,9 +210,12 @@ impl WgpuTexture {
                     if let (Some(w), Some(h), Some(d)) = (width.checked_shr(mip as u32), height.checked_shr(mip as u32), depth.checked_shr(mip as u32)) {
                         let sz = image_3d_size_bytes(pk, w, h, d);
                         if offset + sz > data.len() { break; }
+                        let slice = &data[offset..offset+sz];
+                        let expanded;
+                        let upload_data = if needs_expansion { expanded = expand_to_rgba(pk, slice); &expanded } else { slice };
                         let fmt = pixel_kind_to_wgpu_format(pk);
                         let bps = fmt.block_copy_size(None).unwrap_or(4);
-                        queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, &data[offset..offset+sz], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((w as u32 * bps).max(1)), rows_per_image: Some(h as u32) }, wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: d as u32 });
+                        queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: mip as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, upload_data, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((w as u32 * bps).max(1)), rows_per_image: Some(h as u32) }, wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: d as u32 });
                         offset += sz;
                     }
                 }

@@ -474,6 +474,103 @@ fn prepare_source(code: &str) -> String {
     src
 }
 
+/// Assigns explicit `layout(location = N)` to inter-stage `in`/`out` variables
+/// that lack them. Naga requires explicit locations for all inter-stage variables;
+/// without them, all default to location 0 causing "Multiple bindings" errors.
+///
+/// For vertex shaders: assigns locations to `out` variables (inter-stage outputs).
+/// For fragment shaders: assigns locations to `in` variables (inter-stage inputs).
+/// Fragment `out` variables (render targets) are NOT touched — they keep their defaults.
+///
+/// Uses a fixed base location (8) for inter-stage variables to avoid conflicts
+/// with vertex input locations (typically 0-7) and fragment output locations (typically 0-7).
+/// Both vertex and fragment shaders use the same base, ensuring matching locations.
+fn assign_inter_stage_locations(source: &mut String, kind: &ShaderKind) {
+    /// Base location for inter-stage variables. High enough to avoid conflicts
+    /// with vertex inputs and fragment outputs.
+    const INTER_STAGE_BASE: i32 = 8;
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut unqualified_indices: Vec<usize> = Vec::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        match kind {
+            ShaderKind::Vertex => {
+                // In vertex shaders, assign locations to `out` variables only
+                // (skip `in` which are vertex buffer inputs — they should already have locations)
+                if is_unqualified_out_decl(trimmed) {
+                    unqualified_indices.push(i);
+                }
+            }
+            ShaderKind::Fragment => {
+                // In fragment shaders, assign locations to `in` variables only
+                // (skip `out` which are render target outputs — they should keep defaults)
+                if is_unqualified_in_decl(trimmed) {
+                    unqualified_indices.push(i);
+                }
+            }
+        }
+    }
+
+    if unqualified_indices.is_empty() {
+        return;
+    }
+
+    let mut next_location = INTER_STAGE_BASE;
+    let mut result = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if unqualified_indices.contains(&i) {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let trimmed = line.trim();
+            result.push_str(&format!("{indent}layout (location = {next_location}) {trimmed}\n"));
+            next_location += 1;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    *source = result;
+}
+
+/// Checks if a line is an unqualified `out` variable declaration
+/// (no layout qualifier, starts with `out` followed by a GLSL type).
+fn is_unqualified_out_decl(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("out ") || trimmed.starts_with("out[") {
+        return false;
+    }
+    if trimmed.contains("layout") {
+        return false;
+    }
+    if !trimmed.ends_with(';') {
+        return false;
+    }
+    let tokens: Vec<&str> = trimmed.trim_end_matches(';').split_whitespace().collect();
+    tokens.len() >= 3
+}
+
+/// Checks if a line is an unqualified `in` variable declaration
+/// (no layout qualifier, starts with `in` followed by a GLSL type).
+fn is_unqualified_in_decl(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("in ") || trimmed.starts_with("in[") {
+        return false;
+    }
+    if trimmed.contains("layout") {
+        return false;
+    }
+    if !trimmed.ends_with(';') {
+        return false;
+    }
+    let tokens: Vec<&str> = trimmed.trim_end_matches(';').split_whitespace().collect();
+    tokens.len() >= 3
+}
+
 fn compile_glsl(device: &wgpu::Device, name: &str, kind: &ShaderKind, glsl: &str) -> Result<wgpu::ShaderModule, FrameworkError> {
     let mut frontend = naga::front::glsl::Frontend::default();
     let module = frontend.parse(&naga::front::glsl::Options { stage: naga_stage(kind), defines: Default::default() }, glsl).map_err(|errors| {
@@ -558,6 +655,7 @@ impl WgpuShader {
         }
         generate_resource_declarations(resources, &mut source, &mut line_offset);
         preprocess_shader(&mut source, resources);
+        assign_inter_stage_locations(&mut source, &kind);
         let full = prepare_source(&source);
         let module = compile_glsl(&server.state.device, &name, &kind, &full)?;
         Ok(Self { _server: server.weak_ref(), module, _kind: kind })
@@ -704,5 +802,123 @@ void main()
                 panic!("Naga GLSL parse failed:\n{errors}");
             }
         }
+    }
+
+    #[test]
+    fn test_naga_widget_shader_binding_conflict() {
+        let glsl = r#"#version 450
+
+layout(binding=8) uniform texture2D fyrox_widgetTexture_tex;
+layout(binding=108) uniform sampler fyrox_widgetTexture_samp;
+struct Tfyrox_widgetData{
+    mat4 projectionMatrix;
+    mat3 worldMatrix;
+};
+layout(std140, binding=208) uniform Ufyrox_widgetData { Tfyrox_widgetData fyrox_widgetData; };
+
+layout (location = 0) in vec2 vertexPosition;
+
+void main()
+{
+    vec3 worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3(vertexPosition, 1.0);
+    gl_Position = fyrox_widgetData.projectionMatrix * vec4(worldSpaceVertex, 1.0);
+}
+"#;
+
+        let mut frontend = naga::front::glsl::Frontend::default();
+        let module = frontend.parse(&naga::front::glsl::Options {
+            stage: naga::ShaderStage::Vertex,
+            defines: Default::default(),
+        }, glsl).expect("Naga parse failed");
+
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::empty(),
+            naga::valid::Capabilities::all(),
+        ).validate(&module).expect("Naga validation failed");
+
+        // Dump all global variables and their bindings
+        for (handle, var) in module.global_variables.iter() {
+            let name = var.name.as_deref().unwrap_or("<unnamed>");
+            let binding = var.binding.as_ref().map(|b| format!("set={}, binding={}", b.group, b.binding)).unwrap_or_else(|| "none".into());
+            let space = var.space;
+            eprintln!("GlobalVar {handle:?}: name={name}, binding={binding}, space={space:?}");
+        }
+
+        let spv = naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options {
+            flags: naga::back::spv::WriterFlags::empty(),
+            ..Default::default()
+        }, None).expect("SPIR-V generation failed");
+        let _ = spv;
+    }
+
+    #[test]
+    fn test_assign_inter_stage_locations_vertex_shader() {
+        // Simulates the widget vertex shader pattern: unqualified out variables
+        let mut source = r#"layout (location = 0) in vec2 vertexPosition;
+layout (location = 1) in vec2 vertexTexCoord;
+layout (location = 2) in vec4 vertexColor;
+
+out vec2 texCoord;
+out vec4 color;
+out vec2 localPosition;
+
+void main()
+{
+    texCoord = vertexTexCoord;
+    color = vertexColor;
+    localPosition = vertexPosition;
+}
+"#.to_string();
+
+        assign_inter_stage_locations(&mut source, &ShaderKind::Vertex);
+
+        // Inter-stage outputs start at base location 8
+        assert!(source.contains("layout (location = 8) out vec2 texCoord"));
+        assert!(source.contains("layout (location = 9) out vec4 color"));
+        assert!(source.contains("layout (location = 10) out vec2 localPosition"));
+        // Original vertex inputs should be unchanged
+        assert!(source.contains("layout (location = 0) in vec2 vertexPosition"));
+    }
+
+    #[test]
+    fn test_assign_inter_stage_locations_fragment_shader() {
+        // Simulates the widget fragment shader pattern: unqualified in + out variables
+        // Only `in` variables should get locations; `out` should be left alone
+        let mut source = r#"out vec4 fragColor;
+
+in vec2 texCoord;
+in vec4 color;
+in vec2 localPosition;
+
+void main()
+{
+    fragColor = vec4(1.0);
+}
+"#.to_string();
+
+        assign_inter_stage_locations(&mut source, &ShaderKind::Fragment);
+
+        // `out vec4 fragColor` should NOT get a location (fragment output keeps default)
+        assert!(source.contains("out vec4 fragColor;"));
+        assert!(!source.contains("location") && source.contains("out vec4 fragColor;") ||
+                source.lines().filter(|l| l.contains("fragColor") && l.contains("location")).count() == 0);
+        // `in` variables get sequential locations starting at 8
+        assert!(source.contains("layout (location = 8) in vec2 texCoord"));
+        assert!(source.contains("layout (location = 9) in vec4 color"));
+        assert!(source.contains("layout (location = 10) in vec2 localPosition"));
+    }
+
+    #[test]
+    fn test_assign_inter_stage_locations_no_unqualified() {
+        // No unqualified variables — should be a no-op
+        let mut source = r#"layout (location = 0) in vec3 vertexPosition;
+layout (location = 0) out vec4 fragColor;
+
+void main() { fragColor = vec4(1.0); }
+"#.to_string();
+
+        let original = source.clone();
+        assign_inter_stage_locations(&mut source, &ShaderKind::Vertex);
+        assert_eq!(source, original);
     }
 }
