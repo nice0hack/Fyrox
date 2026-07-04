@@ -83,23 +83,29 @@
             ),
             vertex_shader:
                r#"
-                layout(location = 0) in vec3 vertexPosition;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                };
 
-                out vec3 nearPoint;
-                out vec3 farPoint;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) nearPoint: vec3f,
+                    @location(1) farPoint: vec3f,
+                };
 
-                vec3 Unproject(float x, float y, float z, mat4 matrix)
-                {
-                    vec4 position = matrix * vec4(x, y, z, 1.0);
+                fn Unproject(x: f32, y: f32, z: f32, matrix: mat4x4f) -> vec3f {
+                    var position = matrix * vec4f(x, y, z, 1.0);
                     return position.xyz / position.w;
                 }
 
-                void main()
-                {
-                    mat4 invViewProj = inverse(fyrox_cameraData.viewProjectionMatrix);
-                    nearPoint = Unproject(vertexPosition.x, vertexPosition.y, 0.0, invViewProj);
-                    farPoint = Unproject(vertexPosition.x, vertexPosition.y, 1.0, invViewProj);
-                    gl_Position = vec4(vertexPosition, 1.0);
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
+                    var invViewProj = inverse(fyrox_cameraData.viewProjectionMatrix);
+                    output.nearPoint = Unproject(input.vertexPosition.x, input.vertexPosition.y, 0.0, invViewProj);
+                    output.farPoint = Unproject(input.vertexPosition.x, input.vertexPosition.y, 1.0, invViewProj);
+                    output.position = vec4f(input.vertexPosition, 1.0);
+                    return output;
                 }
                "#,
 
@@ -108,68 +114,68 @@
                 // Original code: https://asliceofrendering.com/scene%20helper/2020/01/05/InfiniteGrid/
                 // Fixed and adapted for Fyrox.
 
-                out vec4 FragColor;
+                struct FragOutput {
+                    @location(0) color: vec4f,
+                    @builtin(frag_depth) depth: f32,
+                };
 
-                in vec3 nearPoint;
-                in vec3 farPoint;
-
-                vec4 grid(vec3 fragPos3D) {
-                    vec2 projection;
-                    vec3 planeNormal;
-                    vec4 xColor;
-                    vec4 yColor;
+                fn grid(fragPos3D: vec3f) -> vec4f {
+                    var projection: vec2f;
+                    var planeNormal: vec3f;
+                    var xColor: vec4f;
+                    var yColor: vec4f;
                     if (properties.orientation == 0) {
                         projection = fragPos3D.xz;
-                        planeNormal = vec3(0.0, 1.0, 0.0);
+                        planeNormal = vec3f(0.0, 1.0, 0.0);
                         xColor = properties.xAxisColor;
                         yColor = properties.zAxisColor;
                     } else if (properties.orientation == 1) {
                         projection = fragPos3D.xy;
-                        planeNormal = vec3(0.0, 0.0, 1.0);
+                        planeNormal = vec3f(0.0, 0.0, 1.0);
                         xColor = properties.yAxisColor;
                         yColor = properties.xAxisColor;
                     } else if (properties.orientation == 2) {
                         projection = fragPos3D.zy;
-                        planeNormal = vec3(1.0, 0.0, 0.0);
+                        planeNormal = vec3f(1.0, 0.0, 0.0);
                         xColor = properties.zAxisColor;
                         yColor = properties.yAxisColor;
                     }
-                
-                    vec2 coord = projection * properties.scale;
-                    vec2 derivative = fwidth(coord);
-                    vec2 grid = abs(fract(coord - 0.5) - 0.5) / derivative;
-                    float line = min(grid.x, grid.y);
-                    float minX = 0.5 * min(derivative.x, 1.0);
-                    float minY = 0.5 * min(derivative.y, 1.0);
 
-                    vec4 color = properties.diffuseColor;
-                    float alpha = 1.0 - min(line, 1.0);
+                    var coord = projection * properties.scale;
+                    var derivative = fwidth(coord);
+                    var gridVal = abs(fract(coord - vec2f(0.5)) - vec2f(0.5)) / derivative;
+                    var lineVal = min(gridVal.x, gridVal.y);
+                    var minX = 0.5 * min(derivative.x, 1.0);
+                    var minY = 0.5 * min(derivative.y, 1.0);
+
+                    var color = properties.diffuseColor;
+                    var alpha = 1.0 - min(lineVal, 1.0);
                     // Sharpen lines a bit.
-                    color.a = alpha >= 0.5 ? 1.0 : 0.0;
+                    color.a = select(0.0, 1.0, alpha >= 0.5);
 
                     if (projection.x > -minX && projection.x < minX) {
-                        color.xyz = xColor.xyz;
+                        color = vec4f(xColor.xyz, color.a);
                     } else if (projection.y > -minY && projection.y < minY) {
-                        color.xyz = yColor.xyz;
+                        color = vec4f(yColor.xyz, color.a);
                     } else {
-                        vec3 viewDir = fragPos3D - fyrox_cameraData.position;
+                        var viewDir = fragPos3D - fyrox_cameraData.position;
                         // This helps to negate moire pattern at large distances.
-                        float cosAngle = abs(dot(planeNormal, normalize(viewDir)));
+                        var cosAngle = abs(dot(planeNormal, normalize(viewDir)));
                         color.a *= cosAngle;
                     }
 
                     return color;
                 }
 
-                float computeDepth(vec3 pos) {
-                    vec4 clip_space_pos = fyrox_cameraData.viewProjectionMatrix * vec4(pos.xyz, 1.0);
+                fn computeDepth(pos: vec3f) -> f32 {
+                    var clip_space_pos = fyrox_cameraData.viewProjectionMatrix * vec4f(pos.xyz, 1.0);
                     return (clip_space_pos.z / clip_space_pos.w);
                 }
 
-                void main()
-                {
-                    float nearCoord;
-                    float farCoord;
+                @fragment
+                fn fs_main(@location(0) nearPoint: vec3f, @location(1) farPoint: vec3f, @builtin(position) fragCoord: vec4f) -> FragOutput {
+                    var nearCoord: f32;
+                    var farCoord: f32;
                     if (properties.orientation == 0) {
                         nearCoord = nearPoint.y;
                         farCoord = farPoint.y;
@@ -181,23 +187,27 @@
                         farCoord = farPoint.x;
                     }
 
-                    float denominator = farCoord - nearCoord;
-                    float t = denominator != 0.0 ? -nearCoord / denominator : 0.0;
+                    var denominator = farCoord - nearCoord;
+                    var t = select(0.0, -nearCoord / denominator, denominator != 0.0);
 
-                    vec3 fragPos3D = nearPoint + t * (farPoint - nearPoint);
+                    var fragPos3D = nearPoint + t * (farPoint - nearPoint);
 
-                    float depth = computeDepth(fragPos3D);
-                    gl_FragDepth = ((gl_DepthRange.diff * depth) + gl_DepthRange.near + gl_DepthRange.far) / 2.0;
+                    var depth = computeDepth(fragPos3D);
 
-                    FragColor = grid(fragPos3D);
-                    if (properties.isPerspective) {
-                        FragColor.a *= float(t > 0.0);
+                    var output: FragOutput;
+                    output.depth = (depth + 1.0) / 2.0;
+
+                    output.color = grid(fragPos3D);
+                    if (properties.isPerspective != 0u) {
+                        output.color.a *= f32(t > 0.0);
                     }
 
                     // Alpha test to prevent blending issues.
-                    if (FragColor.a < 0.01) {
+                    if (output.color.a < 0.01) {
                         discard;
                     }
+
+                    return output;
                 }
                "#,
         ),

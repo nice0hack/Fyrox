@@ -83,6 +83,17 @@ fn blend_factor_to_wgpu(f: fyrox_graphics::BlendFactor) -> wgpu::BlendFactor {
     }
 }
 
+fn cubemap_face_to_layer(face: CubeMapFace) -> u32 {
+    match face {
+        CubeMapFace::PositiveX => 0,
+        CubeMapFace::NegativeX => 1,
+        CubeMapFace::PositiveY => 2,
+        CubeMapFace::NegativeY => 3,
+        CubeMapFace::PositiveZ => 4,
+        CubeMapFace::NegativeZ => 5,
+    }
+}
+
 fn texture_format_for_attachment(tex: &GpuTexture) -> wgpu::TextureFormat {
     tex.as_any().downcast_ref::<WgpuTexture>().unwrap().format()
 }
@@ -97,6 +108,7 @@ pub struct PipelineKey {
     depth_test: bool,
     depth_write: bool,
     cull: u8,
+    extra_vert_count: u8,
 }
 
 pub struct WgpuFrameBuffer {
@@ -115,11 +127,12 @@ impl WgpuFrameBuffer {
         Self { server: server.weak_ref(), depth_attachment: None, color_attachments: Default::default(), is_backbuffer: true }
     }
 
-    fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, geo: &WgpuGeometryBuffer, cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>) -> wgpu::RenderPipeline {
+    fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind) -> wgpu::RenderPipeline {
         let key = PipelineKey {
             program_ptr: program as *const WgpuProgram as usize, color_format: cf, depth_format: df, sample_count: server.msaa_sample_count,
             blend: params.blend.is_some(), depth_test: params.depth_test.is_some(), depth_write: params.depth_write,
             cull: match params.cull_face { Some(CullFace::Back) => 2, Some(CullFace::Front) => 1, None => 0 },
+            extra_vert_count: all_layouts.len() as u8,
         };
         let key_hash = { let mut h = DefaultHasher::new(); key.hash(&mut h); h.finish() };
         { let cache = server.pipeline_cache.borrow(); if let Some(p) = cache.get(&key_hash) { return p.clone(); } }
@@ -141,16 +154,16 @@ impl WgpuFrameBuffer {
 
         let cull = match params.cull_face { Some(CullFace::Back) => Some(wgpu::Face::Back), Some(CullFace::Front) => Some(wgpu::Face::Front), None => None };
 
-        let topo = match geo.element_kind() {
+        let topo = match element_kind {
             fyrox_graphics::ElementKind::Triangle => wgpu::PrimitiveTopology::TriangleList,
             fyrox_graphics::ElementKind::Line => wgpu::PrimitiveTopology::LineList,
             fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
         };
 
         let pipeline = server.state.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("RP"), layout: Some(program.pipeline_layout()),
-            vertex: wgpu::VertexState { module: program.vertex_module(), entry_point: Some("main"), buffers: geo.vertex_buffer_layouts(), compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: program.fragment_module(), entry_point: Some("main"), targets: &[Some(wgpu::ColorTargetState { format: cf, blend: blend_state, write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
+            label: Some("RP"), layout: Some(pipeline_layout),
+            vertex: wgpu::VertexState { module: program.vertex_module(), entry_point: Some("vs_main"), buffers: all_layouts, compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState { module: program.fragment_module(), entry_point: Some("fs_main"), targets: &[Some(wgpu::ColorTargetState { format: cf, blend: blend_state, write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
             primitive: wgpu::PrimitiveState { topology: topo, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: cull, ..Default::default() },
             depth_stencil,
             multisample: wgpu::MultisampleState { count: server.msaa_sample_count, mask: !0, alpha_to_coverage_enabled: false },
@@ -183,15 +196,57 @@ impl WgpuFrameBuffer {
         else { wgpu::TextureFormat::Rgba8Unorm };
 
         let df = self.depth_attachment.as_ref().map(|a| texture_format_for_attachment(&a.texture));
-        let pipeline = self.get_or_create_pipeline(&server, prog, params, geo, cf, df);
+
+        // Collect actual texture formats from resources for layout creation
+        let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
+        for group in resources {
+            for binding in group.bindings {
+                if let ResourceBinding::Texture { texture, binding: loc, .. } = binding {
+                    let wt = texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+                    texture_formats.push((*loc, wt.format()));
+                }
+            }
+        }
+        let (_, pipeline_layout) = prog.get_or_create_layouts(&texture_formats);
+
+        let (all_layouts, extra_vert_count) = build_vertex_layouts(geo);
+        let pipeline = self.get_or_create_pipeline(&server, prog, params, &all_layouts, cf, df, &pipeline_layout, geo.element_kind());
 
         let bind_group = create_bind_group(&server, prog, resources);
         let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("DrawEnc") });
 
-        let color_view = if self.is_backbuffer { surface_tex.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default()) }
-        else { self.color_attachments.first().unwrap().texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone() };
+        let color_view = if self.is_backbuffer {
+            surface_tex.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default())
+        } else {
+            let first_color = self.color_attachments.first().unwrap();
+            if let Some(face) = first_color.cube_map_face() {
+                let wt = first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+                wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: cubemap_face_to_layer(face),
+                    array_layer_count: Some(1),
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            } else {
+                first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone()
+            }
+        };
 
-        let depth_view = self.depth_attachment.as_ref().map(|a| a.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone());
+        let depth_view = self.depth_attachment.as_ref().map(|a| {
+            let wt = a.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+            if let Some(face) = a.cube_map_face() {
+                wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: cubemap_face_to_layer(face),
+                    array_layer_count: Some(1),
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            } else {
+                wt.wgpu_view().clone()
+            }
+        });
 
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -204,8 +259,12 @@ impl WgpuFrameBuffer {
             rp.set_viewport(viewport.x() as f32, viewport.y() as f32, viewport.w() as f32, viewport.h() as f32, 0.0, 1.0);
             rp.set_pipeline(&pipeline);
             if let Some(bg) = &bind_group { rp.set_bind_group(0, bg, &[]); }
-            for (i, vb) in geo.vertex_buffers().iter().enumerate() { rp.set_vertex_buffer(i as u32, vb.slice(..)); }
-            rp.set_index_buffer(geo.element_buffer().slice(..), wgpu::IndexFormat::Uint32);
+            let vbs = geo.vertex_buffers();
+            for (i, vb) in vbs.iter().enumerate() { rp.set_vertex_buffer(i as u32, vb.slice(..)); }
+            let geo_buf_count = vbs.len() as u32;
+            for i in 0..extra_vert_count { rp.set_vertex_buffer(geo_buf_count + i, server.dummy_vertex_buffer.slice(..)); }
+            let eb = geo.element_buffer();
+            rp.set_index_buffer(eb.slice(..), wgpu::IndexFormat::Uint32);
 
             let ipe = geo.element_kind().index_per_element();
             let idx_count = (count * ipe) as u32;
@@ -265,16 +324,60 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
     }
 }
 
+/// Expected vertex attribute locations that the standard shaders may need but
+/// geometry might not provide (e.g. boneWeights, boneIndices, vertexSecondTexCoord).
+const EXTRA_VERTEX_ATTRS: &[(u32, wgpu::VertexFormat)] = &[
+    (4, wgpu::VertexFormat::Float32x4), // boneWeights
+    (5, wgpu::VertexFormat::Float32x4), // boneIndices
+    (6, wgpu::VertexFormat::Float32x2), // vertexSecondTexCoord
+];
+
+/// Builds the full vertex buffer layout list, adding dummy entries for attributes
+/// the shader expects but the geometry doesn't provide. Returns (layouts, extra_count).
+fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayout<'static>>, u32) {
+    let geo_layouts = geo.vertex_buffer_layouts();
+    let mut provided = std::collections::HashSet::new();
+    for layout in geo_layouts {
+        for attr in layout.attributes { provided.insert(attr.shader_location); }
+    }
+    let mut all: Vec<wgpu::VertexBufferLayout<'static>> = geo_layouts.to_vec();
+    let mut extra = 0u32;
+    for &(loc, fmt) in EXTRA_VERTEX_ATTRS {
+        if !provided.contains(&loc) {
+            all.push(wgpu::VertexBufferLayout {
+                array_stride: 0,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: Box::leak(vec![wgpu::VertexAttribute { format: fmt, offset: 0, shader_location: loc }].into_boxed_slice()),
+            });
+            extra += 1;
+        }
+    }
+    (all, extra)
+}
+
+fn is_filterable_format(fmt: wgpu::TextureFormat) -> bool {
+    !matches!(fmt, wgpu::TextureFormat::R32Float | wgpu::TextureFormat::Rg32Float | wgpu::TextureFormat::Rgba32Float
+        | wgpu::TextureFormat::R8Uint | wgpu::TextureFormat::R16Uint | wgpu::TextureFormat::R32Uint
+        | wgpu::TextureFormat::R8Sint | wgpu::TextureFormat::R16Sint | wgpu::TextureFormat::R32Sint)
+}
+
 fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups: &[ResourceBindGroup]) -> Option<wgpu::BindGroup> {
     let mut entries = Vec::new();
+    let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
     for group in groups {
         for binding in group.bindings {
             match binding {
                 ResourceBinding::Texture { texture, sampler, binding: loc } => {
                     let wt = texture.as_any().downcast_ref::<WgpuTexture>()?;
                     let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
+                    texture_formats.push((*loc, wt.format()));
                     entries.push(wgpu::BindGroupEntry { binding: *loc as u32, resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()) });
-                    entries.push(wgpu::BindGroupEntry { binding: (*loc + 100) as u32, resource: wgpu::BindingResource::Sampler(ws.wgpu_sampler()) });
+                    let sampler_res = if is_filterable_format(wt.format()) {
+                        wgpu::BindingResource::Sampler(ws.wgpu_sampler())
+                    } else {
+                        wgpu::BindingResource::Sampler(server.non_filtering_sampler())
+                    };
+                    entries.push(wgpu::BindGroupEntry { binding: (*loc + 100) as u32, resource: sampler_res });
                 }
                 ResourceBinding::Buffer { buffer, binding: loc, data_usage } => {
                     let wb = buffer.as_any().downcast_ref::<WgpuBuffer>()?;
@@ -287,5 +390,6 @@ fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups:
         }
     }
     if entries.is_empty() { return None; }
-    Some(server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: program.bind_group_layout(), entries: &entries }))
+    let (bgl, _) = program.get_or_create_layouts(&texture_formats);
+    Some(server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: &bgl, entries: &entries }))
 }

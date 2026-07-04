@@ -41,26 +41,27 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                    }
 
-                    out vec3 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec3f,
+                    }
 
-                    void main()
-                    {
-                        texCoord = vertexPosition;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.tex_coord = input.vertex_position;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
-
-                    in vec3 texCoord;
-
-                    void main()
-                    {
-                        FragColor = S_SRGBToLinear(texture(cubemapTexture, texCoord));
+                    @fragment fn fs_main(@location(0) tex_coord: vec3f) -> @location(0) vec4f {
+                        return S_SRGBToLinear(textureSample(cubemapTexture_tex, cubemapTexture_samp, tex_coord));
                     }
                 "#,
         )

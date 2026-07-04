@@ -36,27 +36,28 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec4 vertexColor;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexColor: vec4f,
+                    };
 
-                    out vec4 color;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) color: vec4f,
+                    };
 
-                    void main()
-                    {
-                        color = vertexColor;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.color = input.vertexColor;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
-
-                    in vec4 color;
-
-                    void main()
-                    {
-                        FragColor = color;
+                    @fragment fn fs_main(@location(0) color: vec4f) -> @location(0) vec4f {
+                        return color;
                     }
                 "#,
         )

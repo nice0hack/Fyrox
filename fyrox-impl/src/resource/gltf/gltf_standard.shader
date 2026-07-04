@@ -142,65 +142,72 @@
             ),
             vertex_shader:
                 r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 2) in vec3 vertexNormal;
-                layout(location = 3) in vec4 vertexTangent;
-                layout(location = 4) in vec4 boneWeights;
-                layout(location = 5) in vec4 boneIndices;
-                layout(location = 6) in vec2 vertexSecondTexCoord;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexNormal: vec3f,
+                    @location(3) vertexTangent: vec4f,
+                    @location(4) boneWeights: vec4f,
+                    @location(5) boneIndices: vec4f,
+                    @location(6) vertexSecondTexCoord: vec2f,
+                };
 
-                out vec3 position;
-                out vec3 normal;
-                out vec2 texCoord;
-                out vec3 tangent;
-                out vec3 binormal;
-                out vec2 secondTexCoord;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) outPosition: vec3f,
+                    @location(1) normal: vec3f,
+                    @location(2) texCoord: vec2f,
+                    @location(3) tangent: vec3f,
+                    @location(4) binormal: vec3f,
+                    @location(5) secondTexCoord: vec2f,
+                };
 
-                void main()
-                {
-                    vec4 localPosition = vec4(0);
-                    vec3 localNormal = vec3(0);
-                    vec3 localTangent = vec3(0);
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
 
-                    vec4 inputPosition = vec4(vertexPosition, 1.0);
-                    vec3 inputNormal = vertexNormal;
-                    vec3 inputTangent = vertexTangent.xyz;
+                    var localPosition = vec4f(0.0);
+                    var localNormal = vec3f(0.0);
+                    var localTangent = vec3f(0.0);
 
-                    for (int i = 0; i < fyrox_instanceData.blendShapesCount; ++i) {
-                        TBlendShapeOffsets offsets = S_FetchBlendShapeOffsets(blendShapesStorage, gl_VertexID, i);
-                        float weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
-                        inputPosition.xyz += offsets.position * weight;
+                    var inputPosition = vec4f(input.vertexPosition, 1.0);
+                    var inputNormal = input.vertexNormal;
+                    var inputTangent = input.vertexTangent.xyz;
+
+                    for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
+                        inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                         inputNormal += offsets.normal * weight;
                         inputTangent += offsets.tangent * weight;
                     }
 
-                    if (fyrox_instanceData.useSkeletalAnimation)
+                    if (fyrox_instanceData.useSkeletalAnimation != 0u)
                     {
-                        int i0 = int(boneIndices.x);
-                        int i1 = int(boneIndices.y);
-                        int i2 = int(boneIndices.z);
-                        int i3 = int(boneIndices.w);
+                        var i0 = i32(input.boneIndices.x);
+                        var i1 = i32(input.boneIndices.y);
+                        var i2 = i32(input.boneIndices.z);
+                        var i3 = i32(input.boneIndices.w);
 
-                        mat4 m0 = fyrox_boneMatrices.matrices[i0];
-                        mat4 m1 = fyrox_boneMatrices.matrices[i1];
-                        mat4 m2 = fyrox_boneMatrices.matrices[i2];
-                        mat4 m3 = fyrox_boneMatrices.matrices[i3];
+                        var m0 = fyrox_boneMatrices.matrices[i0];
+                        var m1 = fyrox_boneMatrices.matrices[i1];
+                        var m2 = fyrox_boneMatrices.matrices[i2];
+                        var m3 = fyrox_boneMatrices.matrices[i3];
 
-                        localPosition += m0 * inputPosition * boneWeights.x;
-                        localPosition += m1 * inputPosition * boneWeights.y;
-                        localPosition += m2 * inputPosition * boneWeights.z;
-                        localPosition += m3 * inputPosition * boneWeights.w;
+                        localPosition += m0 * inputPosition * input.boneWeights.x;
+                        localPosition += m1 * inputPosition * input.boneWeights.y;
+                        localPosition += m2 * inputPosition * input.boneWeights.z;
+                        localPosition += m3 * inputPosition * input.boneWeights.w;
 
-                        localNormal += mat3(m0) * inputNormal * boneWeights.x;
-                        localNormal += mat3(m1) * inputNormal * boneWeights.y;
-                        localNormal += mat3(m2) * inputNormal * boneWeights.z;
-                        localNormal += mat3(m3) * inputNormal * boneWeights.w;
+                        localNormal += mat3x3f(m0[0].xyz, m0[1].xyz, m0[2].xyz) * inputNormal * input.boneWeights.x;
+                        localNormal += mat3x3f(m1[0].xyz, m1[1].xyz, m1[2].xyz) * inputNormal * input.boneWeights.y;
+                        localNormal += mat3x3f(m2[0].xyz, m2[1].xyz, m2[2].xyz) * inputNormal * input.boneWeights.z;
+                        localNormal += mat3x3f(m3[0].xyz, m3[1].xyz, m3[2].xyz) * inputNormal * input.boneWeights.w;
 
-                        localTangent += mat3(m0) * inputTangent * boneWeights.x;
-                        localTangent += mat3(m1) * inputTangent * boneWeights.y;
-                        localTangent += mat3(m2) * inputTangent * boneWeights.z;
-                        localTangent += mat3(m3) * inputTangent * boneWeights.w;
+                        localTangent += mat3x3f(m0[0].xyz, m0[1].xyz, m0[2].xyz) * inputTangent * input.boneWeights.x;
+                        localTangent += mat3x3f(m1[0].xyz, m1[1].xyz, m1[2].xyz) * inputTangent * input.boneWeights.y;
+                        localTangent += mat3x3f(m2[0].xyz, m2[1].xyz, m2[2].xyz) * inputTangent * input.boneWeights.z;
+                        localTangent += mat3x3f(m3[0].xyz, m3[1].xyz, m3[2].xyz) * inputTangent * input.boneWeights.w;
                     }
                     else
                     {
@@ -209,42 +216,46 @@
                         localTangent = inputTangent;
                     }
 
-                    mat3 nm = mat3(fyrox_instanceData.worldMatrix);
-                    normal = normalize(nm * localNormal);
-                    tangent = normalize(nm * localTangent);
-                    binormal = normalize(vertexTangent.w * cross(normal, tangent));
-                    texCoord = vertexTexCoord;
-                    position = vec3(fyrox_instanceData.worldMatrix * localPosition);
-                    secondTexCoord = vertexSecondTexCoord;
+                    var nm = mat3x3f(fyrox_instanceData.worldMatrix[0].xyz, fyrox_instanceData.worldMatrix[1].xyz, fyrox_instanceData.worldMatrix[2].xyz);
+                    output.normal = normalize(nm * localNormal);
+                    output.tangent = normalize(nm * localTangent);
+                    output.binormal = normalize(input.vertexTangent.w * cross(output.normal, output.tangent));
+                    output.texCoord = input.vertexTexCoord;
+                    output.outPosition = (fyrox_instanceData.worldMatrix * localPosition).xyz;
+                    output.secondTexCoord = input.vertexSecondTexCoord;
 
-                    gl_Position = fyrox_instanceData.worldViewProjection * localPosition;
+                    output.position = fyrox_instanceData.worldViewProjection * localPosition;
+                    return output;
                 }
                 "#,
             fragment_shader:
                 r#"
-                layout(location = 0) out vec4 outColor;
-                layout(location = 1) out vec4 outNormal;
-                layout(location = 2) out vec4 outAmbient;
-                layout(location = 3) out vec4 outMaterial;
-                layout(location = 4) out uint outDecalMask;
+                struct GBufferOutput {
+                    @location(0) outColor: vec4f,
+                    @location(1) outNormal: vec4f,
+                    @location(2) outAmbient: vec4f,
+                    @location(3) outMaterial: vec4f,
+                    @location(4) outDecalMask: u32,
+                };
 
-                in vec3 position;
-                in vec3 normal;
-                in vec2 texCoord;
-                in vec3 tangent;
-                in vec3 binormal;
-                in vec2 secondTexCoord;
+                @fragment
+                fn fs_main(
+                    @location(0) position: vec3f,
+                    @location(1) normal: vec3f,
+                    @location(2) texCoord: vec2f,
+                    @location(3) tangent: vec3f,
+                    @location(4) binormal: vec3f,
+                    @location(5) secondTexCoord: vec2f
+                ) -> GBufferOutput {
+                    var tangentSpace = mat3x3f(tangent, binormal, normal);
+                    var toFragment = normalize(position - fyrox_cameraData.position);
 
-                void main()
-                {
-                    mat3 tangentSpace = mat3(tangent, binormal, normal);
-                    vec3 toFragment = normalize(position - fyrox_cameraData.position);
-
-                    vec2 tc;
-                    if (fyrox_graphicsSettings.usePOM) {
-                        vec3 toFragmentTangentSpace = normalize(transpose(tangentSpace) * toFragment);
+                    var tc: vec2f;
+                    if (fyrox_graphicsSettings.usePOM != 0u) {
+                        var toFragmentTangentSpace = normalize(transpose(tangentSpace) * toFragment);
                         tc = S_ComputeParallaxTextureCoordinates(
-                            heightTexture,
+                            heightTexture_tex,
+                            heightTexture_samp,
                             toFragmentTangentSpace,
                             texCoord * properties.texCoordScale,
                             properties.parallaxCenter,
@@ -254,26 +265,28 @@
                         tc = texCoord * properties.texCoordScale;
                     }
 
-                    outColor = properties.diffuseColor * texture(diffuseTexture, tc);
+                    var output: GBufferOutput;
+                    output.outColor = properties.diffuseColor * textureSample(diffuseTexture_tex, diffuseTexture_samp, tc);
 
                     // Alpha test.
-                    if (outColor.a < 0.5) {
+                    if (output.outColor.a < 0.5) {
                         discard;
                     }
-                    outColor.a = 1.0;
+                    output.outColor.a = 1.0;
 
-                    vec4 n = normalize(texture(normalTexture, tc) * 2.0 - 1.0);
-                    outNormal = vec4(normalize(tangentSpace * n.xyz) * 0.5 + 0.5, 1.0);
+                    var n = normalize(textureSample(normalTexture_tex, normalTexture_samp, tc) * 2.0 - 1.0);
+                    output.outNormal = vec4f(normalize(tangentSpace * n.xyz) * 0.5 + 0.5, 1.0);
 
-                    outMaterial.x = properties.metallicFactor * texture(metallicRoughnessTexture, tc).b; // Metallic
-                    outMaterial.y = properties.roughnessFactor * texture(metallicRoughnessTexture, tc).g; // Roughness
-                    outMaterial.z = texture(aoTexture, tc).r;
-                    outMaterial.a = 1.0;
+                    output.outMaterial.x = properties.metallicFactor * textureSample(metallicRoughnessTexture_tex, metallicRoughnessTexture_samp, tc).b; // Metallic
+                    output.outMaterial.y = properties.roughnessFactor * textureSample(metallicRoughnessTexture_tex, metallicRoughnessTexture_samp, tc).g; // Roughness
+                    output.outMaterial.z = textureSample(aoTexture_tex, aoTexture_samp, tc).r;
+                    output.outMaterial.a = 1.0;
 
-                    outAmbient.xyz = properties.emissionStrength * texture(emissionTexture, tc).rgb + texture(lightmapTexture, secondTexCoord).rgb;
-                    outAmbient.a = 1.0;
+                    output.outAmbient = vec4f(properties.emissionStrength * textureSample(emissionTexture_tex, emissionTexture_samp, tc).rgb + textureSample(lightmapTexture_tex, lightmapTexture_samp, secondTexCoord).rgb, 1.0);
 
-                    outDecalMask = properties.layerIndex;
+                    output.outDecalMask = properties.layerIndex;
+
+                    return output;
                 }
                 "#,
         ),
@@ -312,61 +325,66 @@
             ),
             vertex_shader:
                r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 4) in vec4 boneWeights;
-                layout(location = 5) in vec4 boneIndices;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(4) boneWeights: vec4f,
+                    @location(5) boneIndices: vec4f,
+                };
 
-                out vec3 position;
-                out vec2 texCoord;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) outPosition: vec3f,
+                    @location(1) texCoord: vec2f,
+                };
 
-                void main()
-                {
-                    vec4 localPosition = vec4(0);
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
 
-                    vec4 inputPosition = vec4(vertexPosition, 1.0);
+                    var localPosition = vec4f(0.0);
 
-                    for (int i = 0; i < fyrox_instanceData.blendShapesCount; ++i) {
-                        TBlendShapeOffsets offsets = S_FetchBlendShapeOffsets(blendShapesStorage, gl_VertexID, i);
-                        float weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
-                        inputPosition.xyz += offsets.position * weight;
+                    var inputPosition = vec4f(input.vertexPosition, 1.0);
+
+                    for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
+                        inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
 
-                    if (fyrox_instanceData.useSkeletalAnimation)
+                    if (fyrox_instanceData.useSkeletalAnimation != 0u)
                     {
-                        int i0 = int(boneIndices.x);
-                        int i1 = int(boneIndices.y);
-                        int i2 = int(boneIndices.z);
-                        int i3 = int(boneIndices.w);
+                        var i0 = i32(input.boneIndices.x);
+                        var i1 = i32(input.boneIndices.y);
+                        var i2 = i32(input.boneIndices.z);
+                        var i3 = i32(input.boneIndices.w);
 
-                        mat4 m0 = fyrox_boneMatrices.matrices[i0];
-                        mat4 m1 = fyrox_boneMatrices.matrices[i1];
-                        mat4 m2 = fyrox_boneMatrices.matrices[i2];
-                        mat4 m3 = fyrox_boneMatrices.matrices[i3];
+                        var m0 = fyrox_boneMatrices.matrices[i0];
+                        var m1 = fyrox_boneMatrices.matrices[i1];
+                        var m2 = fyrox_boneMatrices.matrices[i2];
+                        var m3 = fyrox_boneMatrices.matrices[i3];
 
-                        localPosition += m0 * inputPosition * boneWeights.x;
-                        localPosition += m1 * inputPosition * boneWeights.y;
-                        localPosition += m2 * inputPosition * boneWeights.z;
-                        localPosition += m3 * inputPosition * boneWeights.w;
+                        localPosition += m0 * inputPosition * input.boneWeights.x;
+                        localPosition += m1 * inputPosition * input.boneWeights.y;
+                        localPosition += m2 * inputPosition * input.boneWeights.z;
+                        localPosition += m3 * inputPosition * input.boneWeights.w;
                     }
                     else
                     {
                         localPosition = inputPosition;
                     }
-                    gl_Position = fyrox_instanceData.worldViewProjection * localPosition;
-                    texCoord = vertexTexCoord;
+                    output.position = fyrox_instanceData.worldViewProjection * localPosition;
+                    output.texCoord = input.vertexTexCoord;
+                    output.outPosition = (fyrox_instanceData.worldMatrix * localPosition).xyz;
+                    return output;
                 }
                "#,
 
            fragment_shader:
                r#"
-                out vec4 FragColor;
-
-                in vec2 texCoord;
-
-                void main()
-                {
-                    FragColor = properties.diffuseColor * texture(diffuseTexture, texCoord);
+                @fragment
+                fn fs_main(@location(0) position: vec3f, @location(1) texCoord: vec2f) -> @location(0) vec4f {
+                    return properties.diffuseColor * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
                 }
                "#,
         ),
@@ -396,56 +414,62 @@
 
             vertex_shader:
                 r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 4) in vec4 boneWeights;
-                layout(location = 5) in vec4 boneIndices;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(4) boneWeights: vec4f,
+                    @location(5) boneIndices: vec4f,
+                };
 
-                out vec2 texCoord;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) texCoord: vec2f,
+                };
 
-                void main()
-                {
-                    vec4 localPosition = vec4(0);
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
 
-                    vec4 inputPosition = vec4(vertexPosition, 1.0);
+                    var localPosition = vec4f(0.0);
 
-                    for (int i = 0; i < fyrox_instanceData.blendShapesCount; ++i) {
-                        TBlendShapeOffsets offsets = S_FetchBlendShapeOffsets(blendShapesStorage, gl_VertexID, i);
-                        float weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
-                        inputPosition.xyz += offsets.position * weight;
+                    var inputPosition = vec4f(input.vertexPosition, 1.0);
+
+                    for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
+                        inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
 
-                    if (fyrox_instanceData.useSkeletalAnimation)
+                    if (fyrox_instanceData.useSkeletalAnimation != 0u)
                     {
-                        vec4 vertex = vec4(vertexPosition, 1.0);
+                        var vertex = vec4f(input.vertexPosition, 1.0);
 
-                        mat4 m0 = fyrox_boneMatrices.matrices[int(boneIndices.x)];
-                        mat4 m1 = fyrox_boneMatrices.matrices[int(boneIndices.y)];
-                        mat4 m2 = fyrox_boneMatrices.matrices[int(boneIndices.z)];
-                        mat4 m3 = fyrox_boneMatrices.matrices[int(boneIndices.w)];
+                        var m0 = fyrox_boneMatrices.matrices[i32(input.boneIndices.x)];
+                        var m1 = fyrox_boneMatrices.matrices[i32(input.boneIndices.y)];
+                        var m2 = fyrox_boneMatrices.matrices[i32(input.boneIndices.z)];
+                        var m3 = fyrox_boneMatrices.matrices[i32(input.boneIndices.w)];
 
-                        localPosition += m0 * inputPosition * boneWeights.x;
-                        localPosition += m1 * inputPosition * boneWeights.y;
-                        localPosition += m2 * inputPosition * boneWeights.z;
-                        localPosition += m3 * inputPosition * boneWeights.w;
+                        localPosition += m0 * inputPosition * input.boneWeights.x;
+                        localPosition += m1 * inputPosition * input.boneWeights.y;
+                        localPosition += m2 * inputPosition * input.boneWeights.z;
+                        localPosition += m3 * inputPosition * input.boneWeights.w;
                     }
                     else
                     {
                         localPosition = inputPosition;
                     }
 
-                    gl_Position = fyrox_instanceData.worldViewProjection * localPosition;
-                    texCoord = vertexTexCoord;
+                    output.position = fyrox_instanceData.worldViewProjection * localPosition;
+                    output.texCoord = input.vertexTexCoord;
+                    return output;
                 }
                 "#,
 
             fragment_shader:
                 r#"
-                in vec2 texCoord;
-
-                void main()
-                {
-                    if (texture(diffuseTexture, texCoord).a < 0.2) discard;
+                @fragment
+                fn fs_main(@location(0) texCoord: vec2f) {
+                    if (textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord).a < 0.2) { discard; }
                 }
                 "#,
         ),
@@ -475,56 +499,62 @@
 
             vertex_shader:
                 r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 4) in vec4 boneWeights;
-                layout(location = 5) in vec4 boneIndices;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(4) boneWeights: vec4f,
+                    @location(5) boneIndices: vec4f,
+                };
 
-                out vec2 texCoord;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) texCoord: vec2f,
+                };
 
-                void main()
-                {
-                    vec4 localPosition = vec4(0);
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
 
-                    vec4 inputPosition = vec4(vertexPosition, 1.0);
+                    var localPosition = vec4f(0.0);
 
-                    for (int i = 0; i < fyrox_instanceData.blendShapesCount; ++i) {
-                        TBlendShapeOffsets offsets = S_FetchBlendShapeOffsets(blendShapesStorage, gl_VertexID, i);
-                        float weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
-                        inputPosition.xyz += offsets.position * weight;
+                    var inputPosition = vec4f(input.vertexPosition, 1.0);
+
+                    for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
+                        inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
 
-                    if (fyrox_instanceData.useSkeletalAnimation)
+                    if (fyrox_instanceData.useSkeletalAnimation != 0u)
                     {
-                        vec4 vertex = vec4(vertexPosition, 1.0);
+                        var vertex = vec4f(input.vertexPosition, 1.0);
 
-                        mat4 m0 = fyrox_boneMatrices.matrices[int(boneIndices.x)];
-                        mat4 m1 = fyrox_boneMatrices.matrices[int(boneIndices.y)];
-                        mat4 m2 = fyrox_boneMatrices.matrices[int(boneIndices.z)];
-                        mat4 m3 = fyrox_boneMatrices.matrices[int(boneIndices.w)];
+                        var m0 = fyrox_boneMatrices.matrices[i32(input.boneIndices.x)];
+                        var m1 = fyrox_boneMatrices.matrices[i32(input.boneIndices.y)];
+                        var m2 = fyrox_boneMatrices.matrices[i32(input.boneIndices.z)];
+                        var m3 = fyrox_boneMatrices.matrices[i32(input.boneIndices.w)];
 
-                        localPosition += m0 * inputPosition * boneWeights.x;
-                        localPosition += m1 * inputPosition * boneWeights.y;
-                        localPosition += m2 * inputPosition * boneWeights.z;
-                        localPosition += m3 * inputPosition * boneWeights.w;
+                        localPosition += m0 * inputPosition * input.boneWeights.x;
+                        localPosition += m1 * inputPosition * input.boneWeights.y;
+                        localPosition += m2 * inputPosition * input.boneWeights.z;
+                        localPosition += m3 * inputPosition * input.boneWeights.w;
                     }
                     else
                     {
                         localPosition = inputPosition;
                     }
 
-                    gl_Position = fyrox_instanceData.worldViewProjection * localPosition;
-                    texCoord = vertexTexCoord;
+                    output.position = fyrox_instanceData.worldViewProjection * localPosition;
+                    output.texCoord = input.vertexTexCoord;
+                    return output;
                 }
                 "#,
 
             fragment_shader:
                 r#"
-                in vec2 texCoord;
-
-                void main()
-                {
-                    if (texture(diffuseTexture, texCoord).a < 0.2) discard;
+                @fragment
+                fn fs_main(@location(0) texCoord: vec2f) {
+                    if (textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord).a < 0.2) { discard; }
                 }
                 "#,
         ),
@@ -554,62 +584,71 @@
 
             vertex_shader:
                 r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 4) in vec4 boneWeights;
-                layout(location = 5) in vec4 boneIndices;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(4) boneWeights: vec4f,
+                    @location(5) boneIndices: vec4f,
+                };
 
-                out vec2 texCoord;
-                out vec3 worldPosition;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) texCoord: vec2f,
+                    @location(1) worldPosition: vec3f,
+                };
 
-                void main()
-                {
-                    vec4 localPosition = vec4(0);
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
 
-                    vec4 inputPosition = vec4(vertexPosition, 1.0);
+                    var localPosition = vec4f(0.0);
 
-                    for (int i = 0; i < fyrox_instanceData.blendShapesCount; ++i) {
-                        TBlendShapeOffsets offsets = S_FetchBlendShapeOffsets(blendShapesStorage, gl_VertexID, i);
-                        float weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
-                        inputPosition.xyz += offsets.position * weight;
+                    var inputPosition = vec4f(input.vertexPosition, 1.0);
+
+                    for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
+                        inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
 
-                    if (fyrox_instanceData.useSkeletalAnimation)
+                    if (fyrox_instanceData.useSkeletalAnimation != 0u)
                     {
-                        vec4 vertex = vec4(vertexPosition, 1.0);
+                        var vertex = vec4f(input.vertexPosition, 1.0);
 
-                        mat4 m0 = fyrox_boneMatrices.matrices[int(boneIndices.x)];
-                        mat4 m1 = fyrox_boneMatrices.matrices[int(boneIndices.y)];
-                        mat4 m2 = fyrox_boneMatrices.matrices[int(boneIndices.z)];
-                        mat4 m3 = fyrox_boneMatrices.matrices[int(boneIndices.w)];
+                        var m0 = fyrox_boneMatrices.matrices[i32(input.boneIndices.x)];
+                        var m1 = fyrox_boneMatrices.matrices[i32(input.boneIndices.y)];
+                        var m2 = fyrox_boneMatrices.matrices[i32(input.boneIndices.z)];
+                        var m3 = fyrox_boneMatrices.matrices[i32(input.boneIndices.w)];
 
-                        localPosition += m0 * inputPosition * boneWeights.x;
-                        localPosition += m1 * inputPosition * boneWeights.y;
-                        localPosition += m2 * inputPosition * boneWeights.z;
-                        localPosition += m3 * inputPosition * boneWeights.w;
+                        localPosition += m0 * inputPosition * input.boneWeights.x;
+                        localPosition += m1 * inputPosition * input.boneWeights.y;
+                        localPosition += m2 * inputPosition * input.boneWeights.z;
+                        localPosition += m3 * inputPosition * input.boneWeights.w;
                     }
                     else
                     {
                         localPosition = inputPosition;
                     }
 
-                    gl_Position = fyrox_instanceData.worldViewProjection * localPosition;
-                    worldPosition = (fyrox_instanceData.worldMatrix * localPosition).xyz;
-                    texCoord = vertexTexCoord;
+                    output.position = fyrox_instanceData.worldViewProjection * localPosition;
+                    output.worldPosition = (fyrox_instanceData.worldMatrix * localPosition).xyz;
+                    output.texCoord = input.vertexTexCoord;
+                    return output;
                 }
                 "#,
 
             fragment_shader:
                 r#"
-                in vec2 texCoord;
-                in vec3 worldPosition;
+                struct PointShadowOutput {
+                    @location(0) depth: f32,
+                };
 
-                layout(location = 0) out float depth;
-
-                void main()
-                {
-                    if (texture(diffuseTexture, texCoord).a < 0.2) discard;
-                    depth = length(fyrox_lightData.lightPosition - worldPosition);
+                @fragment
+                fn fs_main(@location(0) texCoord: vec2f, @location(1) worldPosition: vec3f) -> PointShadowOutput {
+                    if (textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord).a < 0.2) { discard; }
+                    var output: PointShadowOutput;
+                    output.depth = length(fyrox_lightData.lightPosition - worldPosition);
+                    return output;
                 }
                 "#,
         )

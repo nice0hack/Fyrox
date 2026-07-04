@@ -59,25 +59,38 @@
             ),
             vertex_shader:
                r#"
-                layout(location = 0) in vec3 vertexPosition;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                };
 
-                void main()
-                {
-                    gl_Position = fyrox_instanceData.worldViewProjection * vec4(vertexPosition, 1.0);
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                };
+
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
+                    output.position = fyrox_instanceData.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                    return output;
                 }
                "#,
 
            fragment_shader:
                r#"
-                out vec4 FragColor;
+                struct FragOutput {
+                    @location(0) color: vec4f,
+                    @builtin(frag_depth) depth: f32,
+                };
 
-                void main()
-                {
-                    FragColor = properties.diffuseColor;
+                @fragment
+                fn fs_main(@builtin(position) fragCoord: vec4f) -> FragOutput {
+                    var output: FragOutput;
+                    output.color = properties.diffuseColor;
 
                     // Pull depth towards near clipping plane so the gizmo will be drawn on top
                     // of everything, but its parts will be correctly handled by depth test.
-                    gl_FragDepth = gl_FragCoord.z * 0.001;
+                    output.depth = fragCoord.z * 0.001;
+                    return output;
                 }
                "#,
         ),

@@ -3,7 +3,7 @@
     resources: [
         (
             name: "depthSampler",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 0
         ),
         (
@@ -57,54 +57,55 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                        @location(1) vertex_tex_coord: vec2f,
+                    }
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec2f,
+                    }
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.tex_coord = input.vertex_tex_coord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out float finalOcclusion;
-
-                    in vec2 texCoord;
-
-                    vec3 GetViewSpacePosition(vec2 screenCoord) {
-                        return S_UnProject(vec3(screenCoord, texture(depthSampler, screenCoord).r), properties.inverseProjectionMatrix);
+                    fn GetViewSpacePosition(screenCoord: vec2f) -> vec3f {
+                        return S_UnProject(vec3f(screenCoord, textureSample(depthSampler_tex, depthSampler_samp, screenCoord)), properties.inverseProjectionMatrix);
                     }
 
-                    void main() {
-                        vec3 fragPos = GetViewSpacePosition(texCoord);
-                        vec3 worldSpaceNormal = texture(normalSampler, texCoord).xyz * 2.0 - 1.0;
-                        vec3 viewSpaceNormal = normalize(properties.viewMatrix * worldSpaceNormal);
-                        vec3 randomVec = normalize(texture(noiseSampler, texCoord * properties.noiseScale).xyz * 2.0 - 1.0);
+                    @fragment fn fs_main(@location(0) tex_coord: vec2f) -> @location(0) f32 {
+                        let fragPos = GetViewSpacePosition(tex_coord);
+                        let worldSpaceNormal = textureSample(normalSampler_tex, normalSampler_samp, tex_coord).xyz * 2.0 - 1.0;
+                        let viewSpaceNormal = normalize(properties.viewMatrix * worldSpaceNormal);
+                        let randomVec = normalize(textureSample(noiseSampler_tex, noiseSampler_samp, tex_coord * properties.noiseScale).xyz * 2.0 - 1.0);
 
-                        vec3 tangent = normalize(randomVec - viewSpaceNormal * dot(randomVec, viewSpaceNormal));
-                        vec3 bitangent = normalize(cross(viewSpaceNormal, tangent));
-                        mat3 TBN = mat3(tangent, bitangent, viewSpaceNormal);
+                        let tangent = normalize(randomVec - viewSpaceNormal * dot(randomVec, viewSpaceNormal));
+                        let bitangent = normalize(cross(viewSpaceNormal, tangent));
+                        let TBN = mat3x3f(tangent, bitangent, viewSpaceNormal);
 
-                        float occlusion = 0.0;
-                        const int kernelSize = 32;
-                        for (int i = 0; i < kernelSize; ++i) {
-                            vec3 samplePoint = fragPos.xyz + TBN * properties.kernel[i] * properties.radius;
+                        var occlusion: f32 = 0.0;
+                        const kernelSize: i32 = 32;
+                        for (var i: i32 = 0; i < kernelSize; i++) {
+                            let samplePoint = fragPos + TBN * properties.kernel[i] * properties.radius;
 
-                            vec4 offset = properties.projectionMatrix * vec4(samplePoint, 1.0);
-                            offset.xy /= offset.w;
-                            offset.xy = offset.xy * 0.5 + 0.5;
+                            let offset = properties.projectionMatrix * vec4f(samplePoint, 1.0);
+                            let screenUv = (offset.xy / offset.w) * 0.5 + 0.5;
 
-                            vec3 position = GetViewSpacePosition(offset.xy);
+                            let position = GetViewSpacePosition(screenUv);
 
-                            float rangeCheck = smoothstep(0.0, 1.0, properties.radius / abs(fragPos.z - position.z));
-                            occlusion += rangeCheck * ((position.z > samplePoint.z + 0.04) ? 1.0 : 0.0);
+                            let rangeCheck = smoothstep(0.0, 1.0, properties.radius / abs(fragPos.z - position.z));
+                            occlusion += rangeCheck * select(0.0, 1.0, position.z > samplePoint.z + 0.04);
                         }
 
-                        finalOcclusion = 1.0 - occlusion / float(kernelSize);
+                        return 1.0 - occlusion / f32(kernelSize);
                     }
                 "#,
         )

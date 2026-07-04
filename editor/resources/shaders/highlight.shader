@@ -53,46 +53,50 @@
 
             vertex_shader:
                 r#"
-                    layout(location = 0) in vec3 vertexPosition;
-                    layout(location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexTexCoord: vec2f,
+                    };
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex
+                    fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    layout (location = 0) out vec4 outColor;
+                    @fragment
+                    fn fs_main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
+                        var size = textureDimensions(frameTexture_tex);
 
-                    in vec2 texCoord;
+                        var w = 1.0 / f32(size.x);
+                        var h = 1.0 / f32(size.y);
 
-                    void main() {
-                        ivec2 size = textureSize(frameTexture, 0);
+                        var n: array<f32, 9>;
+                        n[0] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(-w, -h)).a;
+                        n[1] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(0.0, -h)).a;
+                        n[2] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(w, -h)).a;
+                        n[3] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(-w, 0.0)).a;
+                        n[4] = textureSample(frameTexture_tex, frameTexture_samp, texCoord).a;
+                        n[5] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(w, 0.0)).a;
+                        n[6] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(-w, h)).a;
+                        n[7] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(0.0, h)).a;
+                        n[8] = textureSample(frameTexture_tex, frameTexture_samp, texCoord + vec2f(w, h)).a;
 
-                        float w = 1.0 / float(size.x);
-                        float h = 1.0 / float(size.y);
+                        var sobel_edge_h = n[2] + (2.0 * n[5]) + n[8] - (n[0] + (2.0 * n[3]) + n[6]);
+                        var sobel_edge_v = n[0] + (2.0 * n[1]) + n[2] - (n[6] + (2.0 * n[7]) + n[8]);
+                        var sobel = sqrt((sobel_edge_h * sobel_edge_h) + (sobel_edge_v * sobel_edge_v));
 
-                        float n[9];
-                        n[0] = texture(frameTexture, texCoord + vec2(-w, -h)).a;
-                        n[1] = texture(frameTexture, texCoord + vec2(0.0, -h)).a;
-                        n[2] = texture(frameTexture, texCoord + vec2(w, -h)).a;
-                        n[3] = texture(frameTexture, texCoord + vec2( -w, 0.0)).a;
-                        n[4] = texture(frameTexture, texCoord).a;
-                        n[5] = texture(frameTexture, texCoord + vec2(w, 0.0)).a;
-                        n[6] = texture(frameTexture, texCoord + vec2(-w, h)).a;
-                        n[7] = texture(frameTexture, texCoord + vec2(0.0, h)).a;
-                        n[8] = texture(frameTexture, texCoord + vec2(w, h)).a;
-
-                        float sobel_edge_h = n[2] + (2.0 * n[5]) + n[8] - (n[0] + (2.0 * n[3]) + n[6]);
-                        float sobel_edge_v = n[0] + (2.0 * n[1]) + n[2] - (n[6] + (2.0 * n[7]) + n[8]);
-                        float sobel = sqrt((sobel_edge_h * sobel_edge_h) + (sobel_edge_v * sobel_edge_v));
-
-                        outColor = vec4(properties.color.rgb, properties.color.a * sobel);
+                        return vec4f(properties.color.rgb, properties.color.a * sobel);
                     }
                 "#,
         )

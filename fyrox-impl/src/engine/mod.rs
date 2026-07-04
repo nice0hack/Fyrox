@@ -113,7 +113,7 @@ use fyrox_animation::AnimationTracksData;
 use fyrox_core::dyntype::DynTypeConstructorContainer;
 use fyrox_core::NameProvider;
 use fyrox_graphics::server::SharedGraphicsServer;
-use fyrox_graphics_gl::server::GlGraphicsServer;
+
 use fyrox_sound::{
     buffer::{loader::SoundBufferLoader, SoundBuffer},
     renderer::hrtf::{HrirSphereLoader, HrirSphereResourceData},

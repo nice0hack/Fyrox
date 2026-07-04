@@ -41,55 +41,55 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                    };
 
-                    out vec3 localPos;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) localPos: vec3f,
+                    };
 
-                    void main()
-                    {
-                        localPos = vertexPosition;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.localPos = input.vertexPosition;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                out vec4 FragColor;
-                in vec3 localPos;
+                    @fragment fn fs_main(@location(0) localPos: vec3f) -> @location(0) vec4f {
+                        let N = normalize(localPos);
 
-                void main()
-                {
-                    vec3 N = normalize(localPos);
+                        var irradiance = vec3f(0.0);
 
-                    vec3 irradiance = vec3(0.0);
+                        var up = vec3f(0.0, 1.0, 0.0);
+                        let right = normalize(cross(up, N));
+                        up = normalize(cross(N, right));
 
-                    vec3 up  = vec3(0.0, 1.0, 0.0);
-                    vec3 right = normalize(cross(up, N));
-                    up = normalize(cross(N, right));
+                        let sampleDelta: f32 = 0.1;
+                        var nrSamples: f32 = 0.0;
+                        for (var phi: f32 = 0.0; phi < 2.0 * PI; phi += sampleDelta) {
+                            let cosPhi = cos(phi);
+                            let sinPhi = sin(phi);
 
-                    float sampleDelta = 0.1;
-                    float nrSamples = 0.0;
-                    for(float phi = 0.0; phi < 2.0 * PI; phi += sampleDelta)
-                    {
-                        float cosPhi = cos(phi);
-                        float sinPhi = sin(phi);
+                            for (var theta: f32 = 0.0; theta < 0.5 * PI; theta += sampleDelta) {
+                                let cosTheta = cos(theta);
+                                let sinTheta = sin(theta);
 
-                        for(float theta = 0.0; theta < 0.5 * PI; theta += sampleDelta)
-                        {
-                            float cosTheta = cos(theta);
-                            float sinTheta = sin(theta);
+                                let tangentSample = vec3f(sinTheta * cosPhi, sinTheta * sinPhi, cosTheta);
+                                let sampleVec = tangentSample.x * right + tangentSample.y * up + tangentSample.z * N;
 
-                            vec3 tangentSample = vec3(sinTheta * cosPhi, sinTheta * sinPhi, cosTheta);
-                            vec3 sampleVec = tangentSample.x * right + tangentSample.y * up + tangentSample.z * N;
-
-                            irradiance += texture(environmentMap, sampleVec).rgb * cosTheta * sinTheta;
-                            nrSamples++;
+                                irradiance += textureSample(environmentMap_tex, environmentMap_samp, sampleVec).rgb * cosTheta * sinTheta;
+                                nrSamples += 1.0;
+                            }
                         }
-                    }
-                    irradiance = PI * irradiance * (1.0 / float(nrSamples));
+                        irradiance = PI * irradiance * (1.0 / nrSamples);
 
-                    FragColor = vec4(irradiance, 1.0);
-                }
+                        return vec4f(irradiance, 1.0);
+                    }
                 "#,
         )
     ]

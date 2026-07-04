@@ -19,96 +19,85 @@
         (
             name: "Forward",
 
-            // Drawing parameters explicitly controlled from code.
-
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec2 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
-                    layout (location = 2) in vec4 vertexColor;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec2f,
+                        @location(1) vertexTexCoord: vec2f,
+                        @location(2) vertexColor: vec4f,
+                    };
 
-                    out vec2 texCoord;
-                    out vec4 color;
-                    out vec2 localPosition;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                        @location(1) color: vec4f,
+                        @location(2) localPosition: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        color = vertexColor;
-
-                        localPosition = vertexPosition;
-                        vec3 worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3(vertexPosition, 1.0);
-                        gl_Position = fyrox_widgetData.projectionMatrix * vec4(worldSpaceVertex, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        output.color = input.vertexColor;
+                        output.localPosition = input.vertexPosition;
+                        let worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3f(input.vertexPosition, 1.0);
+                        output.position = fyrox_widgetData.projectionMatrix * vec4f(worldSpaceVertex, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    // IMPORTANT: UI is rendered in sRGB color space!
-                    out vec4 fragColor;
-
-                    in vec2 texCoord;
-                    in vec4 color;
-                    in vec2 localPosition;
-
-                    float project_point(vec2 a, vec2 b, vec2 p) {
-                        vec2 ab = b - a;
+                    fn project_point(a: vec2f, b: vec2f, p: vec2f) -> f32 {
+                        let ab = b - a;
                         return clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
                     }
 
-                    int find_stop_index(float t) {
-                        int idx = 0;
-
-                        for (int i = 0; i < fyrox_widgetData.gradientPointCount; ++i) {
-                            if (t > fyrox_widgetData.gradientStops[i]) {
+                    fn find_stop_index(t: f32) -> i32 {
+                        var idx: i32 = 0;
+                        for (var i: i32 = 0; i < i32(fyrox_widgetData.gradientPointCount); i++) {
+                            if (t > fyrox_widgetData.gradientStops[i].x) {
                                 idx = i;
                             }
                         }
-
                         return idx;
                     }
 
-                    void main()
-                    {
-                        vec2 size = vec2(fyrox_widgetData.boundsMax.x - fyrox_widgetData.boundsMin.x, fyrox_widgetData.boundsMax.y - fyrox_widgetData.boundsMin.y);
-                        vec2 normalizedPosition = (localPosition - fyrox_widgetData.boundsMin) / size;
+                    @fragment fn fs_main(
+                        @location(0) texCoord: vec2f,
+                        @location(1) color: vec4f,
+                        @location(2) localPosition: vec2f
+                    ) -> @location(0) vec4f {
+                        let size = vec2f(fyrox_widgetData.boundsMax.x - fyrox_widgetData.boundsMin.x, fyrox_widgetData.boundsMax.y - fyrox_widgetData.boundsMin.y);
+                        let normalizedPosition = (localPosition - fyrox_widgetData.boundsMin) / size;
 
+                        var fragColor: vec4f;
                         if (fyrox_widgetData.brushType == 0) {
-                            // Solid color
                             fragColor = fyrox_widgetData.solidColor;
                         } else {
-                            // Gradient brush
-                            float t = 0.0;
-
+                            var t: f32 = 0.0;
                             if (fyrox_widgetData.brushType == 1) {
-                                // Linear gradient
                                 t = project_point(fyrox_widgetData.gradientOrigin, fyrox_widgetData.gradientEnd, normalizedPosition);
                             } else if (fyrox_widgetData.brushType == 2) {
-                                // Radial gradient
                                 t = clamp(length(normalizedPosition - fyrox_widgetData.gradientOrigin), 0.0, 1.0);
                             }
-
-                            int current = find_stop_index(t);
-                            int next = min(current + 1, fyrox_widgetData.gradientPointCount);
-                            float delta = fyrox_widgetData.gradientStops[next] - fyrox_widgetData.gradientStops[current];
-                            float mix_factor = (t - fyrox_widgetData.gradientStops[current]) / delta;
+                            let current = find_stop_index(t);
+                            let next = min(current + 1, i32(fyrox_widgetData.gradientPointCount));
+                            let delta = fyrox_widgetData.gradientStops[next] - fyrox_widgetData.gradientStops[current];
+                            let mix_factor = (t - fyrox_widgetData.gradientStops[current]) / delta;
                             fragColor = mix(fyrox_widgetData.gradientColors[current], fyrox_widgetData.gradientColors[next], mix_factor);
                         }
 
-                        vec4 diffuseColor = texture(fyrox_widgetTexture, texCoord);
+                        let diffuseColor = textureSample(fyrox_widgetTexture_tex, fyrox_widgetTexture_samp, texCoord);
 
-                        if (fyrox_widgetData.isFont)
-                        {
+                        if (fyrox_widgetData.isFont != 0u) {
                             fragColor.a *= diffuseColor.r;
-                        }
-                        else
-                        {
+                        } else {
                             fragColor *= diffuseColor;
                         }
 
                         fragColor.a *= fyrox_widgetData.opacity;
-
                         fragColor *= color;
+                        return fragColor;
                     }
                 "#,
         ),
@@ -138,22 +127,16 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec2 vertexPosition;
-
-                    void main()
-                    {
-                        vec3 worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3(vertexPosition, 1.0);
-                        gl_Position = fyrox_widgetData.projectionMatrix * vec4(worldSpaceVertex, 1.0);
+                    @vertex fn vs_main(@location(0) vertexPosition: vec2f) -> @builtin(position) vec4f {
+                        let worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3f(vertexPosition, 1.0);
+                        return fyrox_widgetData.projectionMatrix * vec4f(worldSpaceVertex, 1.0);
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
-
-                    void main()
-                    {
-                       FragColor = vec4(1.0);
+                    @fragment fn fs_main() -> @location(0) vec4f {
+                        return vec4f(1.0);
                     }
                 "#,
         )

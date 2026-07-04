@@ -3,7 +3,7 @@
     resources: [
         (
             name: "depthTexture",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 0
         ),
         (
@@ -23,7 +23,7 @@
         ),
         (
             name: "spotShadowTexture",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 4
         ),
         (
@@ -97,60 +97,62 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                        @location(1) vertex_tex_coord: vec2f,
+                    }
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec2f,
+                    }
 
-                    void main()
-                    {
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
-                        texCoord = vertexTexCoord;
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        output.tex_coord = input.vertex_tex_coord;
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    in vec2 texCoord;
-                    out vec4 FragColor;
+                    @fragment fn fs_main(@location(0) tex_coord: vec2f) -> @location(0) vec4f {
+                        let material = textureSample(materialTexture_tex, materialTexture_samp, tex_coord).rgb;
 
-                    void main()
-                    {
-                        vec3 material = texture(materialTexture, texCoord).rgb;
+                        let fragment_position = S_UnProject(vec3f(tex_coord, textureSample(depthTexture_tex, depthTexture_samp, tex_coord)), properties.invViewProj);
+                        let fragment_to_light = properties.lightPos - fragment_position;
+                        let dist = length(fragment_to_light);
+                        let diffuse_color = textureSample(colorTexture_tex, colorTexture_samp, tex_coord);
 
-                        vec3 fragmentPosition = S_UnProject(vec3(texCoord, texture(depthTexture, texCoord).r), properties.invViewProj);
-                        vec3 fragmentToLight = properties.lightPos - fragmentPosition;
-                        float distance = length(fragmentToLight);
-                        vec4 diffuseColor = texture(colorTexture, texCoord);
-
-                        TPBRContext ctx;
-                        ctx.albedo = S_SRGBToLinear(diffuseColor).rgb;
-                        ctx.fragmentToLight = fragmentToLight / distance;
-                        ctx.fragmentNormal = normalize(texture(normalTexture, texCoord).xyz * 2.0 - 1.0);
+                        var ctx: TPBRContext;
+                        ctx.albedo = S_SRGBToLinear(diffuse_color).rgb;
+                        ctx.fragmentToLight = fragment_to_light / dist;
+                        ctx.fragmentNormal = normalize(textureSample(normalTexture_tex, normalTexture_samp, tex_coord).xyz * 2.0 - 1.0);
                         ctx.lightColor = properties.lightColor.rgb;
                         ctx.metallic = material.x;
                         ctx.roughness = material.y;
-                        ctx.viewVector = normalize(properties.cameraPosition - fragmentPosition);
+                        ctx.viewVector = normalize(properties.cameraPosition - fragment_position);
 
-                        vec3 lighting = S_PBR_CalculateLight(ctx);
+                        let lighting = S_PBR_CalculateLight(ctx);
 
-                        float distanceAttenuation = S_LightDistanceAttenuation(distance, properties.lightRadius);
+                        let distance_attenuation = S_LightDistanceAttenuation(dist, properties.lightRadius);
 
-                        float spotAngleCos = dot(properties.lightDirection, ctx.fragmentToLight);
-                        float coneFactor = smoothstep(properties.halfConeAngleCos, properties.halfHotspotConeAngleCos, spotAngleCos);
+                        let spot_angle_cos = dot(properties.lightDirection, ctx.fragmentToLight);
+                        let cone_factor = smoothstep(properties.halfConeAngleCos, properties.halfHotspotConeAngleCos, spot_angle_cos);
 
-                        float shadow = S_SpotShadowFactor(
-                            properties.shadowsEnabled, properties.softShadows, properties.shadowBias, fragmentPosition,
-                            properties.lightViewProjMatrix, properties.shadowMapInvSize, spotShadowTexture);
-                        float finalShadow = mix(1.0, shadow, properties.shadowAlpha);
+                        let shadow = S_SpotShadowFactor_Depth(
+                            properties.shadowsEnabled != 0u, properties.softShadows != 0u, properties.shadowBias, fragment_position,
+                            properties.lightViewProjMatrix, properties.shadowMapInvSize, spotShadowTexture_tex, spotShadowTexture_samp);
+                        let final_shadow = mix(1.0, shadow, properties.shadowAlpha);
 
-                        vec4 cookieAttenuation = vec4(1.0);
-                        if (properties.cookieEnabled) {
-                            vec2 texCoords = S_Project(fragmentPosition, properties.lightViewProjMatrix).xy;
-                            cookieAttenuation = texture(cookieTexture, texCoords);
+                        var cookie_attenuation = vec4f(1.0);
+                        if (properties.cookieEnabled != 0u) {
+                            let cookie_tex_coords = S_Project(fragment_position, properties.lightViewProjMatrix).xy;
+                            cookie_attenuation = textureSample(cookieTexture_tex, cookieTexture_samp, cookie_tex_coords);
                         }
 
-                        FragColor = cookieAttenuation * vec4(distanceAttenuation * properties.lightIntensity * coneFactor * finalShadow * lighting, diffuseColor.a);
+                        return cookie_attenuation * vec4f(distance_attenuation * properties.lightIntensity * cone_factor * final_shadow * lighting, diffuse_color.a);
                     }
                 "#,
         )

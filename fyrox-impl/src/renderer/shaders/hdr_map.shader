@@ -61,52 +61,54 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexTexCoord: vec2f,
+                    };
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    in vec2 texCoord;
-
-                    out vec4 outLdrColor;
-
-                    vec3 ColorGrading(vec3 color) {
-                        const float lutSize = 16.0;
-                        const float a = (lutSize - 1.0) / lutSize;
-                        const float b = 1.0 / (2.0 * lutSize);
-                        vec3 scale = vec3(a);
-                        vec3 offset = vec3(b);
-                        return texture(colorMapSampler, scale * color + offset).rgb;
+                    fn ColorGrading(color: vec3f) -> vec3f {
+                        const lutSize: f32 = 16.0;
+                        const a: f32 = (lutSize - 1.0) / lutSize;
+                        const b: f32 = 1.0 / (2.0 * lutSize);
+                        let scale = vec3f(a);
+                        let offset = vec3f(b);
+                        return textureSample(colorMapSampler_tex, colorMapSampler_samp, scale * color + offset).rgb;
                     }
 
                     // Narkowicz 2015, "ACES Filmic Tone Mapping Curve"
-                    float TonemapACES(float x) {
-                        const float a = 2.51;
-                        const float b = 0.03;
-                        const float c = 2.43;
-                        const float d = 0.59;
-                        const float e = 0.14;
+                    fn TonemapACES(x: f32) -> f32 {
+                        const a: f32 = 2.51;
+                        const b: f32 = 0.03;
+                        const c: f32 = 2.43;
+                        const d: f32 = 0.59;
+                        const e: f32 = 0.14;
                         return (x * (a * x + b)) / (x * (c * x + d) + e);
                     }
 
-                    void main() {
-                        vec4 hdrColor = texture(hdrSampler, texCoord) + texture(bloomSampler, texCoord);
+                    @fragment fn fs_main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
+                        let hdrColor = textureSample(hdrSampler_tex, hdrSampler_samp, texCoord) + textureSample(bloomSampler_tex, bloomSampler_samp, texCoord);
 
-                        vec3 Yxy = S_ConvertRgbToYxy(hdrColor.rgb);
+                        var Yxy = S_ConvertRgbToYxy(hdrColor.rgb);
 
-                        float lp;
-                        if (properties.autoExposure) {
-                            float avgLum = texture(lumSampler, vec2(0.5, 0.5)).r;
-                            float clampedAvgLum = clamp(avgLum, properties.minLuminance, properties.maxLuminance);
+                        var lp: f32;
+                        if (properties.autoExposure != 0u) {
+                            let avgLum = textureSample(lumSampler_tex, lumSampler_samp, vec2f(0.5, 0.5)).r;
+                            let clampedAvgLum = clamp(avgLum, properties.minLuminance, properties.maxLuminance);
                             lp = Yxy.x / (9.6 * clampedAvgLum + 0.0001);
                         } else {
                             lp = Yxy.x * properties.fixedExposure;
@@ -114,12 +116,12 @@
 
                         Yxy.x = TonemapACES(lp);
 
-                        vec4 ldrColor = vec4(S_ConvertYxyToRgb(Yxy), hdrColor.a);
+                        let ldrColor = vec4f(S_ConvertYxyToRgb(Yxy), hdrColor.a);
 
-                        if (properties.useColorGrading) {
-                            outLdrColor = vec4(ColorGrading(S_LinearToSRGB(ldrColor).rgb), ldrColor.a);
+                        if (properties.useColorGrading != 0u) {
+                            return vec4f(ColorGrading(S_LinearToSRGB(ldrColor).rgb), ldrColor.a);
                         } else {
-                            outLdrColor = S_LinearToSRGB(ldrColor);
+                            return S_LinearToSRGB(ldrColor);
                         }
                     }
                 "#,

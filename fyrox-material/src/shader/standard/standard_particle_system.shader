@@ -9,7 +9,7 @@
         ),
         (
             name: "fyrox_sceneDepth",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 1
         ),
         (
@@ -94,78 +94,80 @@
             ),
             vertex_shader:
                r#"
-               layout(location = 0) in vec3 vertexPosition;
-               layout(location = 1) in vec2 vertexTexCoord;
-               layout(location = 2) in float particleSize;
-               layout(location = 3) in float particleRotation;
-               layout(location = 4) in vec4 vertexColor;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(2) particleSize: f32,
+                    @location(3) particleRotation: f32,
+                    @location(4) vertexColor: vec4f,
+                };
 
-               out vec2 texCoord;
-               out vec4 color;
-               out vec3 fragmentPosition;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) texCoord: vec2f,
+                    @location(1) color: vec4f,
+                    @location(2) fragmentPosition: vec3f,
+                };
 
-               void main()
-               {
-                   color = S_SRGBToLinear(vertexColor);
-                   texCoord = vertexTexCoord;
-                   vec2 vertexOffset = S_RotateVec2(vertexTexCoord * 2.0 - 1.0, particleRotation);
-                   vec4 worldPosition = fyrox_instanceData.worldMatrix * vec4(vertexPosition, 1.0);
-                   vec3 offset = (vertexOffset.x * fyrox_cameraData.sideVector + vertexOffset.y * fyrox_cameraData.upVector) * particleSize;
-                   vec4 finalPosition = worldPosition + vec4(offset.x, offset.y, offset.z, 0.0);
-                   fragmentPosition = finalPosition.xyz;
-                   gl_Position = fyrox_cameraData.viewProjectionMatrix * finalPosition;
-               }
+                @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
+                    output.color = S_SRGBToLinear(input.vertexColor);
+                    output.texCoord = input.vertexTexCoord;
+                    let vertexOffset = S_RotateVec2(input.vertexTexCoord * 2.0 - 1.0, input.particleRotation);
+                    let worldPosition = fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0);
+                    let offset = (vertexOffset.x * fyrox_cameraData.sideVector + vertexOffset.y * fyrox_cameraData.upVector) * input.particleSize;
+                    let finalPosition = worldPosition + vec4f(offset.x, offset.y, offset.z, 0.0);
+                    output.fragmentPosition = finalPosition.xyz;
+                    output.position = fyrox_cameraData.viewProjectionMatrix * finalPosition;
+                    return output;
+                }
                "#,
 
            fragment_shader:
                r#"
-               out vec4 FragColor;
+                fn toProjSpace(z: f32) -> f32 {
+                    return (fyrox_cameraData.zFar * fyrox_cameraData.zNear) / (fyrox_cameraData.zFar - z * fyrox_cameraData.zRange);
+                }
 
-               in vec2 texCoord;
-               in vec4 color;
-               in vec3 fragmentPosition;
+                @fragment fn fs_main(
+                    @location(0) texCoord: vec2f,
+                    @location(1) color: vec4f,
+                    @location(2) fragmentPosition: vec3f,
+                    @builtin(position) fragCoord: vec4f
+                ) -> @location(0) vec4f {
+                    let depthTextureSize = textureDimensions(fyrox_sceneDepth_tex, 0);
+                    let pixelSize = vec2f(1.0 / f32(depthTextureSize.x), 1.0 / f32(depthTextureSize.y));
+                    let sceneDepth = toProjSpace(textureSample(fyrox_sceneDepth_tex, fyrox_sceneDepth_samp, fragCoord.xy * pixelSize));
+                    let fragmentDepth = toProjSpace(fragCoord.z);
+                    let depthOpacity = smoothstep((sceneDepth - fragmentDepth) * properties.softBoundarySharpnessFactor, 0.0, 1.0);
 
-               float toProjSpace(float z)
-               {
-                   return (fyrox_cameraData.zFar * fyrox_cameraData.zNear) / (fyrox_cameraData.zFar - z * fyrox_cameraData.zRange);
-               }
+                    var lighting: vec3f;
+                    if (properties.useLighting != 0u) {
+                        lighting = fyrox_lightData.ambientLightColor.xyz;
+                        for (var i: i32 = 0; i < min(i32(fyrox_lightsBlock.lightCount), 16); i++) {
+                            let halfHotspotAngleCos = fyrox_lightsBlock.lightsParameters[i].x;
+                            let halfConeAngleCos = fyrox_lightsBlock.lightsParameters[i].y;
+                            let lightColor = fyrox_lightsBlock.lightsColorRadius[i].xyz;
+                            let radius = fyrox_lightsBlock.lightsColorRadius[i].w;
+                            let lightPosition = fyrox_lightsBlock.lightsPosition[i];
+                            let direction = fyrox_lightsBlock.lightsDirection[i];
 
-               void main()
-               {
-                   ivec2 depthTextureSize = textureSize(fyrox_sceneDepth, 0);
-                   vec2 pixelSize = vec2(1.0 / float(depthTextureSize.x), 1.0 / float(depthTextureSize.y));
-                   float sceneDepth = toProjSpace(texture(fyrox_sceneDepth, gl_FragCoord.xy * pixelSize).r);
-                   float fragmentDepth = toProjSpace(gl_FragCoord.z);
-                   float depthOpacity = smoothstep((sceneDepth - fragmentDepth) * properties.softBoundarySharpnessFactor, 0.0, 1.0);
+                            let toFragment = fragmentPosition - lightPosition;
+                            let dist = length(toFragment);
+                            let toFragmentNormalized = toFragment / dist;
+                            let distanceAttenuation = S_LightDistanceAttenuation(dist, radius);
+                            let spotAngleCos = dot(toFragmentNormalized, direction);
+                            let directionalAttenuation = smoothstep(halfConeAngleCos, halfHotspotAngleCos, spotAngleCos);
+                            lighting += lightColor * (distanceAttenuation * directionalAttenuation);
+                        }
+                    } else {
+                        lighting = vec3f(1.0);
+                    }
 
-                   vec3 lighting;
-                   if (properties.useLighting) {
-                      lighting = fyrox_lightData.ambientLightColor.xyz;
-                      for(int i = 0; i < min(fyrox_lightsBlock.lightCount, 16); ++i) {
-                          // "Unpack" light parameters.
-                          float halfHotspotAngleCos = fyrox_lightsBlock.lightsParameters[i].x;
-                          float halfConeAngleCos = fyrox_lightsBlock.lightsParameters[i].y;
-                          vec3 lightColor = fyrox_lightsBlock.lightsColorRadius[i].xyz;
-                          float radius = fyrox_lightsBlock.lightsColorRadius[i].w;
-                          vec3 lightPosition = fyrox_lightsBlock.lightsPosition[i];
-                          vec3 direction = fyrox_lightsBlock.lightsDirection[i];
-
-                          // Calculate lighting.
-                          vec3 toFragment = fragmentPosition - lightPosition;
-                          float distance = length(toFragment);
-                          vec3 toFragmentNormalized = toFragment / distance;
-                          float distanceAttenuation = S_LightDistanceAttenuation(distance, radius);
-                          float spotAngleCos = dot(toFragmentNormalized, direction);
-                          float directionalAttenuation = smoothstep(halfConeAngleCos, halfHotspotAngleCos, spotAngleCos);
-                          lighting += lightColor * (distanceAttenuation * directionalAttenuation);
-                      }
-                   } else {
-                      lighting = vec3(1.0);
-                   }
-
-                   FragColor = vec4(lighting, 1.0) * color * S_SRGBToLinear(texture(diffuseTexture, texCoord)).r;
-                   FragColor.a *= depthOpacity;
-               }
+                    var fragColor = vec4f(lighting, 1.0) * color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord)).r;
+                    fragColor.a *= depthOpacity;
+                    return fragColor;
+                }
                "#,
         )
     ],

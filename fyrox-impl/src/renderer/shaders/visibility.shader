@@ -59,34 +59,37 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                    };
 
-                    flat out uint objectIndex;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) objectIndex: u32,
+                    };
 
-                    void main()
-                    {
-                        objectIndex = uint(gl_InstanceID);
-                        gl_Position = (properties.viewProjection * S_FetchMatrix(matrices, gl_InstanceID)) * vec4(vertexPosition, 1.0);
+                    @vertex
+                    fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.objectIndex = instance_index;
+                        output.position = (properties.viewProjection * S_FetchMatrix(matrices_tex, matrices_samp, i32(instance_index))) * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
+                    @fragment
+                    fn fs_main(@location(0) objectIndex: u32, @builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+                        var x = i32(fragCoord.x) / properties.tileSize;
+                        var y = i32(properties.frameBufferHeight - fragCoord.y) / properties.tileSize;
 
-                    flat in uint objectIndex;
-
-                    void main()
-                    {
-                        int x = int(gl_FragCoord.x) / properties.tileSize;
-                        int y = int(properties.frameBufferHeight - gl_FragCoord.y) / properties.tileSize;
-
-                        int bitIndex = -1;
-                        int tileDataIndex = x * 33;
-                        int count = int(texelFetch(tileBuffer, ivec2(tileDataIndex, y), 0).x);
-                        int objectsListStartIndex = tileDataIndex + 1;
-                        for (int i = 0; i < count; ++i) {
-                            uint pixelObjectIndex = uint(texelFetch(tileBuffer, ivec2(objectsListStartIndex + i, y), 0).x);
+                        var bitIndex: i32 = -1;
+                        var tileDataIndex = x * 33;
+                        var count = i32(textureLoad(tileBuffer_tex, vec2i(tileDataIndex, y), 0).x);
+                        var objectsListStartIndex = tileDataIndex + 1;
+                        for (var i: i32 = 0; i < count; i++) {
+                            var pixelObjectIndex = u32(textureLoad(tileBuffer_tex, vec2i(objectsListStartIndex + i, y), 0).x);
                             if (pixelObjectIndex == objectIndex) {
                                 bitIndex = i;
                                 break;
@@ -94,14 +97,14 @@
                         }
 
                         if (bitIndex < 0) {
-                            FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+                            return vec4f(0.0, 0.0, 0.0, 0.0);
                         } else {
-                            uint outMask = uint(1 << bitIndex);
-                            float r = float(outMask & 255u) / 255.0;
-                            float g = float((outMask & 65280u) >> 8) / 255.0;
-                            float b = float((outMask & 16711680u) >> 16) / 255.0;
-                            float a = float((outMask & 4278190080u) >> 24) / 255.0;
-                            FragColor = vec4(r, g, b, a);
+                            var outMask = 1u << u32(bitIndex);
+                            var r = f32(outMask & 255u) / 255.0;
+                            var g = f32((outMask & 65280u) >> 8) / 255.0;
+                            var b = f32((outMask & 16711680u) >> 16) / 255.0;
+                            var a = f32((outMask & 4278190080u) >> 24) / 255.0;
+                            return vec4f(r, g, b, a);
                         }
                     }
                 "#,

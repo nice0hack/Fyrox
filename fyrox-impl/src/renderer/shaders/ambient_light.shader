@@ -18,7 +18,7 @@
         ),
         (
             name: "depthTexture",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 3
         ),
         (
@@ -97,61 +97,76 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                        @location(1) vertex_tex_coord: vec2f,
+                    }
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec2f,
+                    }
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.tex_coord = input.vertex_tex_coord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
-                    in vec2 texCoord;
+                    @fragment fn fs_main(@location(0) tex_coord: vec2f) -> @location(0) vec4f {
+                        let depth = textureSample(depthTexture_tex, depthTexture_samp, tex_coord);
+                        let fragment_position = S_UnProject(vec3f(tex_coord, depth), properties.invViewProj);
 
-                    void main()
-                    {
-                        float depth = texture(depthTexture, texCoord).r;
-                        vec3 fragmentPosition = S_UnProject(vec3(texCoord, depth), properties.invViewProj);
+                        let albedo = S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, tex_coord));
 
-                        vec4 albedo = S_SRGBToLinear(texture(diffuseTexture, texCoord));
+                        let fragment_normal = normalize(textureSample(normalTexture_tex, normalTexture_samp, tex_coord).xyz * 2.0 - 1.0);
 
-                        vec3 fragmentNormal = normalize(texture(normalTexture, texCoord).xyz * 2.0 - 1.0);
+                        let material = textureSample(materialTexture_tex, materialTexture_samp, tex_coord).rgb;
+                        let metallic = material.x;
+                        let roughness = material.y;
+                        let material_ao = material.z;
 
-                        vec3 material = texture(materialTexture, texCoord).rgb;
-                        float metallic = material.x;
-                        float roughness = material.y;
-                        float materialAo = material.z;
+                        let view_vector = normalize(properties.cameraPosition - fragment_position);
+                        let reflection_vector = -reflect(view_vector, fragment_normal);
 
-                        vec3 viewVector = normalize(properties.cameraPosition - fragmentPosition);
-                        vec3 reflectionVector = -reflect(viewVector, fragmentNormal);
+                        let clamped_cos_view_angle = max(dot(fragment_normal, view_vector), 0.0);
 
-                        float clampedCosViewAngle = max(dot(fragmentNormal, viewVector), 0.0);
+                        let cube_map_size = textureDimensions(prefilteredSpecularMap_tex, 0);
+                        let mip = roughness * (floor(log2(f32(cube_map_size.x))) + 1.0);
 
-                        ivec2 cubeMapSize = textureSize(prefilteredSpecularMap, 0);
-                        float mip = roughness * (floor(log2(float(cubeMapSize.x))) + 1.0);
-                        vec3 reflection = properties.skyboxLighting ? S_SRGBToLinear(textureLod(prefilteredSpecularMap, reflectionVector, mip)).rgb : properties.ambientColor.rgb;
+                        var reflection: vec3f;
+                        if (properties.skyboxLighting != 0u) {
+                            reflection = S_SRGBToLinear(textureSampleLevel(prefilteredSpecularMap_tex, prefilteredSpecularMap_samp, reflection_vector, mip)).rgb;
+                        } else {
+                            reflection = properties.ambientColor.rgb;
+                        }
 
-                        vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
-                        vec3 F = S_FresnelSchlickRoughness(clampedCosViewAngle, F0, roughness);
-                        vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+                        let F0 = mix(vec3f(0.04), albedo.rgb, metallic);
+                        let F = S_FresnelSchlickRoughness(clamped_cos_view_angle, F0, roughness);
+                        let kD = (vec3f(1.0) - F) * (1.0 - metallic);
 
-                        vec2 envBRDF = texture(brdfLUT, vec2(clampedCosViewAngle, roughness)).rg;
-                        vec3 specular = reflection * (F * envBRDF.x + envBRDF.y);
+                        let envBRDF = textureSample(brdfLUT_tex, brdfLUT_samp, vec2f(clamped_cos_view_angle, roughness)).rg;
+                        let specular = reflection * (F * envBRDF.x + envBRDF.y);
 
-                        float ambientOcclusion = texture(aoSampler, texCoord).r * materialAo;
-                        vec4 bakedLighting = texture(bakedLightingTexture, texCoord);
+                        let ambient_occlusion = textureSample(aoSampler_tex, aoSampler_samp, tex_coord).r * material_ao;
+                        let baked_lighting = textureSample(bakedLightingTexture_tex, bakedLightingTexture_samp, tex_coord);
 
-                        vec3 irradiance = S_SRGBToLinear(texture(irradianceMap, fragmentNormal)).rgb;
-                        vec3 diffuse = (bakedLighting.rgb + properties.environmentLightingBrightness * (properties.skyboxLighting ? irradiance : properties.ambientColor.rgb)) * albedo.rgb;
+                        let irradiance = S_SRGBToLinear(textureSample(irradianceMap_tex, irradianceMap_samp, fragment_normal)).rgb;
 
-                        FragColor.rgb = (kD * diffuse + specular) * ambientOcclusion;
-                        FragColor.a = bakedLighting.a;
+                        var ambient_lighting: vec3f;
+                        if (properties.skyboxLighting != 0u) {
+                            ambient_lighting = irradiance;
+                        } else {
+                            ambient_lighting = properties.ambientColor.rgb;
+                        }
+                        let diffuse = (baked_lighting.rgb + properties.environmentLightingBrightness * ambient_lighting) * albedo.rgb;
+
+                        let output_rgb = (kD * diffuse + specular) * ambient_occlusion;
+                        return vec4f(output_rgb, baked_lighting.a);
                     }
                 "#,
         )

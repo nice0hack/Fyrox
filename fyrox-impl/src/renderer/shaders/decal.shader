@@ -3,7 +3,7 @@
     resources: [
         (
             name: "sceneDepth",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 0
         ),
         (
@@ -72,68 +72,77 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                    }
 
-                    out vec4 clipSpacePosition;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) clip_space_position: vec4f,
+                    }
 
-                    void main()
-                    {
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
-                        clipSpacePosition = gl_Position;
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        output.clip_space_position = output.position;
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    layout (location = 0) out vec4 outDiffuseMap;
-                    layout (location = 1) out vec4 outNormalMap;
+                    struct FragmentOutput {
+                        @location(0) out_diffuse_map: vec4f,
+                        @location(1) out_normal_map: vec4f,
+                    }
 
-                    in vec4 clipSpacePosition;
+                    @fragment fn fs_main(@location(0) clip_space_position: vec4f) -> FragmentOutput {
+                        let screen_pos = clip_space_position.xy / clip_space_position.w;
 
-                    void main()
-                    {
-                        vec2 screenPos = clipSpacePosition.xy / clipSpacePosition.w;
-
-                        vec2 texCoord = vec2(
-                        (1.0 + screenPos.x) / 2.0 + (0.5 / properties.resolution.x),
-                        (1.0 + screenPos.y) / 2.0 + (0.5 / properties.resolution.y)
+                        let tex_coord = vec2f(
+                            (1.0 + screen_pos.x) / 2.0 + (0.5 / properties.resolution.x),
+                            (1.0 + screen_pos.y) / 2.0 + (0.5 / properties.resolution.y)
                         );
 
-                        uvec4 maskIndex = texture(decalMask, texCoord);
+                        let mask_index = textureLoad(decalMask_tex, vec2i(tex_coord * vec2f(textureDimensions(decalMask_tex))), 0);
 
                         // Masking.
-                        if (maskIndex.r != properties.layerIndex) {
+                        if (mask_index.r != properties.layerIndex) {
                             discard;
                         }
 
-                        float sceneDepth = texture(sceneDepth, texCoord).r;
+                        let scene_depth = textureSample(sceneDepth_tex, sceneDepth_samp, tex_coord);
 
-                        vec3 sceneWorldPosition = S_UnProject(vec3(texCoord, sceneDepth), properties.invViewProj);
+                        let scene_world_position = S_UnProject(vec3f(tex_coord, scene_depth), properties.invViewProj);
 
-                        vec3 decalSpacePosition = (properties.invWorldDecal * vec4(sceneWorldPosition, 1.0)).xyz;
+                        let decal_space_position = (properties.invWorldDecal * vec4f(scene_world_position, 1.0)).xyz;
 
                         // Check if scene pixel is not inside decal bounds.
-                        vec3 dpos = vec3(0.5) - abs(decalSpacePosition.xyz);
+                        let dpos = vec3f(0.5) - abs(decal_space_position);
                         if (dpos.x < 0.0 || dpos.y < 0.0 || dpos.z < 0.0) {
                             discard;
                         }
 
-                        vec2 decalTexCoord = decalSpacePosition.xz + 0.5;
+                        let decal_tex_coord = decal_space_position.xz + 0.5;
 
-                        outDiffuseMap = properties.color * texture(diffuseTexture, decalTexCoord);
+                        let diffuse = properties.color * textureSample(diffuseTexture_tex, diffuseTexture_samp, decal_tex_coord);
 
-                        vec3 fragmentTangent = dFdx(sceneWorldPosition);
-                        vec3 fragmentBinormal = dFdy(sceneWorldPosition);
-                        vec3 fragmentNormal = cross(fragmentTangent, fragmentBinormal);
+                        let fragment_tangent = dpdx(scene_world_position);
+                        let fragment_binormal = dpdy(scene_world_position);
+                        let fragment_normal = cross(fragment_tangent, fragment_binormal);
 
-                        mat3 tangentToWorld;
-                        tangentToWorld[0] = normalize(fragmentTangent); // Tangent
-                        tangentToWorld[1] = normalize(fragmentBinormal); // Binormal
-                        tangentToWorld[2] = normalize(fragmentNormal); // Normal
+                        var tangent_to_world: mat3x3f;
+                        tangent_to_world[0] = normalize(fragment_tangent); // Tangent
+                        tangent_to_world[1] = normalize(fragment_binormal); // Binormal
+                        tangent_to_world[2] = normalize(fragment_normal); // Normal
 
-                        vec3 rawNormal = (texture(normalTexture, decalTexCoord) * 2.0 - 1.0).xyz;
-                        vec3 worldSpaceNormal = tangentToWorld * rawNormal;
-                        outNormalMap = vec4(worldSpaceNormal * 0.5 + 0.5, outDiffuseMap.a);
+                        let raw_normal = (textureSample(normalTexture_tex, normalTexture_samp, decal_tex_coord) * 2.0 - 1.0).xyz;
+                        let world_space_normal = tangent_to_world * raw_normal;
+
+                        var output: FragmentOutput;
+                        output.out_diffuse_map = diffuse;
+                        output.out_normal_map = vec4f(world_space_normal * 0.5 + 0.5, diffuse.a);
+                        return output;
                     }
                 "#,
         )

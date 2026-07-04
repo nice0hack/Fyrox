@@ -68,54 +68,55 @@
             ),
             vertex_shader:
                r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 2) in vec4 vertexColor;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexColor: vec4f,
+                };
 
-                out vec2 texCoord;
-                out vec4 color;
-                out vec3 fragmentPosition;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) texCoord: vec2f,
+                    @location(1) color: vec4f,
+                    @location(2) fragmentPosition: vec3f,
+                };
 
-                void main()
-                {
-                    texCoord = vertexTexCoord / vec2(textureSize(diffuseTexture, 0));
-                    fragmentPosition = (fyrox_instanceData.worldMatrix * vec4(vertexPosition, 1.0)).xyz;
-                    gl_Position = fyrox_instanceData.worldViewProjection * vec4(vertexPosition, 1.0);
-                    color = vertexColor;
+                @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
+                    output.texCoord = input.vertexTexCoord / vec2f(textureDimensions(diffuseTexture_tex, 0));
+                    output.fragmentPosition = (fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0)).xyz;
+                    output.position = fyrox_instanceData.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                    output.color = input.vertexColor;
+                    return output;
                 }
                "#,
 
            fragment_shader:
                r#"
-                out vec4 FragColor;
+                @fragment fn fs_main(
+                    @location(0) texCoord: vec2f,
+                    @location(1) color: vec4f,
+                    @location(2) fragmentPosition: vec3f
+                ) -> @location(0) vec4f {
+                    var lighting = fyrox_lightData.ambientLightColor.xyz;
+                    for (var i: i32 = 0; i < min(i32(fyrox_lightsBlock.lightCount), 16); i++) {
+                        let halfHotspotAngleCos = fyrox_lightsBlock.lightsParameters[i].x;
+                        let halfConeAngleCos = fyrox_lightsBlock.lightsParameters[i].y;
+                        let lightColor = fyrox_lightsBlock.lightsColorRadius[i].xyz;
+                        let radius = fyrox_lightsBlock.lightsColorRadius[i].w;
+                        let lightPosition = fyrox_lightsBlock.lightsPosition[i];
+                        let direction = fyrox_lightsBlock.lightsDirection[i];
 
-                in vec2 texCoord;
-                in vec4 color;
-                in vec3 fragmentPosition;
-
-                void main()
-                {
-                    vec3 lighting = fyrox_lightData.ambientLightColor.xyz;
-                    for(int i = 0; i < min(fyrox_lightsBlock.lightCount, 16); ++i) {
-                        // "Unpack" light parameters.
-                        float halfHotspotAngleCos = fyrox_lightsBlock.lightsParameters[i].x;
-                        float halfConeAngleCos = fyrox_lightsBlock.lightsParameters[i].y;
-                        vec3 lightColor = fyrox_lightsBlock.lightsColorRadius[i].xyz;
-                        float radius = fyrox_lightsBlock.lightsColorRadius[i].w;
-                        vec3 lightPosition = fyrox_lightsBlock.lightsPosition[i];
-                        vec3 direction = fyrox_lightsBlock.lightsDirection[i];
-
-                        // Calculate lighting.
-                        vec3 toFragment = fragmentPosition - lightPosition;
-                        float distance = length(toFragment);
-                        vec3 toFragmentNormalized = toFragment / distance;
-                        float distanceAttenuation = S_LightDistanceAttenuation(distance, radius);
-                        float spotAngleCos = dot(toFragmentNormalized, direction);
-                        float directionalAttenuation = smoothstep(halfConeAngleCos, halfHotspotAngleCos, spotAngleCos);
+                        let toFragment = fragmentPosition - lightPosition;
+                        let distance = length(toFragment);
+                        let toFragmentNormalized = toFragment / distance;
+                        let distanceAttenuation = S_LightDistanceAttenuation(distance, radius);
+                        let spotAngleCos = dot(toFragmentNormalized, direction);
+                        let directionalAttenuation = smoothstep(halfConeAngleCos, halfHotspotAngleCos, spotAngleCos);
                         lighting += lightColor * (distanceAttenuation * directionalAttenuation);
                     }
 
-                    FragColor = vec4(lighting, 1.0) * color * S_SRGBToLinear(texture(diffuseTexture, texCoord));
+                    return vec4f(lighting, 1.0) * color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
                 }
                "#,
         )

@@ -43,49 +43,50 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexTexCoord: vec2f,
+                    };
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    in vec2 texCoord;
+                    @fragment fn fs_main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
+                        const weights = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
 
-                    out vec4 outColor;
+                        let center = textureSample(image_tex, image_samp, texCoord);
 
-                    void main()
-                    {
-                        const float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+                        var result = center.rgb * weights[0];
 
-                        vec4 center = texture(image, texCoord);
+                        if (properties.horizontal != 0u) {
+                            for (var i: i32 = 1; i < 5; i++) {
+                                let fi = f32(i);
 
-                        vec3 result = center.rgb * weights[0];
-
-                        if (properties.horizontal) {
-                            for (int i = 1; i < 5; ++i) {
-                                float fi = float(i);
-
-                                result += texture(image, texCoord + vec2(properties.pixelSize.x * fi, 0.0)).rgb * weights[i];
-                                result += texture(image, texCoord - vec2(properties.pixelSize.x * fi, 0.0)).rgb * weights[i];
+                                result += textureSample(image_tex, image_samp, texCoord + vec2f(properties.pixelSize.x * fi, 0.0)).rgb * weights[i];
+                                result += textureSample(image_tex, image_samp, texCoord - vec2f(properties.pixelSize.x * fi, 0.0)).rgb * weights[i];
                             }
                         } else {
-                            for (int i = 1; i < 5; ++i) {
-                                float fi = float(i);
+                            for (var i: i32 = 1; i < 5; i++) {
+                                let fi = f32(i);
 
-                                result += texture(image, texCoord + vec2(0.0, properties.pixelSize.y * fi)).rgb * weights[i];
-                                result += texture(image, texCoord - vec2(0.0, properties.pixelSize.y * fi)).rgb * weights[i];
+                                result += textureSample(image_tex, image_samp, texCoord + vec2f(0.0, properties.pixelSize.y * fi)).rgb * weights[i];
+                                result += textureSample(image_tex, image_samp, texCoord - vec2f(0.0, properties.pixelSize.y * fi)).rgb * weights[i];
                             }
                         }
 
-                        outColor = vec4(result, center.a);
+                        return vec4f(result, center.a);
                     }
                 "#,
         )

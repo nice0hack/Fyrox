@@ -42,37 +42,43 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                    };
 
-                    void main()
-                    {
-                        gl_Position = properties.viewProjection * vec4(vertexPosition, 1.0);
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                    };
+
+                    @vertex
+                    fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.position = properties.viewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out uint optimizedVisibilityMask;
+                    @fragment
+                    fn fs_main(@builtin(position) fragCoord: vec4f) -> @location(0) u32 {
+                        var tileX = i32(fragCoord.x);
+                        var tileY = i32(fragCoord.y);
 
-                    void main()
-                    {
-                        int tileX = int(gl_FragCoord.x);
-                        int tileY = int(gl_FragCoord.y);
+                        var beginX = tileX * properties.tileSize;
+                        var beginY = tileY * properties.tileSize;
 
-                        int beginX = tileX * properties.tileSize;
-                        int beginY = tileY * properties.tileSize;
+                        var endX = (tileX + 1) * properties.tileSize;
+                        var endY = (tileY + 1) * properties.tileSize;
 
-                        int endX = (tileX + 1) * properties.tileSize;
-                        int endY = (tileY + 1) * properties.tileSize;
-
-                        int visibilityMask = 0;
-                        for (int y = beginY; y < endY; ++y) {
-                            for (int x = beginX; x < endX; ++x) {
-                                ivec4 mask = ivec4(texelFetch(visibilityBuffer, ivec2(x, y), 0) * 255.0);
-                                visibilityMask |= (mask.a << 24) | (mask.b << 16) | (mask.g << 8) | mask.r;
+                        var visibilityMask: i32 = 0;
+                        for (var y: i32 = beginY; y < endY; y++) {
+                            for (var x: i32 = beginX; x < endX; x++) {
+                                var mask = vec4i(textureLoad(visibilityBuffer_tex, vec2i(x, y), 0) * 255.0);
+                                visibilityMask |= (mask.w << 24) | (mask.z << 16) | (mask.y << 8) | mask.x;
                             }
                         }
-                        optimizedVisibilityMask = uint(visibilityMask);
+                        return u32(visibilityMask);
                     }
                 "#,
         )

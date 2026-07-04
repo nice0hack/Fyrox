@@ -56,30 +56,33 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexTexCoord: vec2f,
+                    };
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        vec2 vertexOffset = vertexTexCoord * 2.0 - 1.0;
-                        vec4 worldPosition = properties.worldMatrix * vec4(vertexPosition, 1.0);
-                        vec3 offset = (vertexOffset.x * properties.cameraSideVector + vertexOffset.y * properties.cameraUpVector) * properties.size;
-                        gl_Position = properties.viewProjectionMatrix * (worldPosition + vec4(offset.x, offset.y, offset.z, 0.0));
+                    @vertex
+                    fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        var vertexOffset = input.vertexTexCoord * 2.0 - 1.0;
+                        var worldPosition = properties.worldMatrix * vec4f(input.vertexPosition, 1.0);
+                        var offset = (vertexOffset.x * properties.cameraSideVector + vertexOffset.y * properties.cameraUpVector) * properties.size;
+                        output.position = properties.viewProjectionMatrix * (worldPosition + vec4f(offset.x, offset.y, offset.z, 0.0));
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
-
-                    in vec2 texCoord;
-
-                    void main()
-                    {
-                        FragColor = texture(diffuseTexture, texCoord);
+                    @fragment
+                    fn fs_main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
+                        return textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
                     }
                 "#,
         )

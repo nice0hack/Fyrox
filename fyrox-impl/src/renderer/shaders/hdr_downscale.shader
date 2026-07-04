@@ -42,51 +42,54 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexTexCoord: vec2f,
+                    };
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    in vec2 texCoord;
+                    @fragment fn fs_main(@location(0) texCoord: vec2f) -> @location(0) f32 {
+                        let x = properties.invSize.x;
+                        let y = properties.invSize.y;
+                        let twoX = 2.0 * x;
+                        let twoY = 2.0 * y;
 
-                    out float outLum;
+                        let a = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x - twoX, texCoord.y + twoY)).r;
+                        let b = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x, texCoord.y + twoY)).r;
+                        let c = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x + twoX, texCoord.y + twoY)).r;
 
-                    void main() {
-                        float x = properties.invSize.x;
-                        float y = properties.invSize.y;
-                        float twoX = 2.0 * x;
-                        float twoY = 2.0 * y;
+                        let d = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x - twoX, texCoord.y)).r;
+                        let e = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x, texCoord.y)).r;
+                        let f = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x + twoX, texCoord.y)).r;
 
-                        float a = texture(lumSampler, vec2(texCoord.x - twoX, texCoord.y + twoY)).r;
-                        float b = texture(lumSampler, vec2(texCoord.x, texCoord.y + twoY)).r;
-                        float c = texture(lumSampler, vec2(texCoord.x + twoX, texCoord.y + twoY)).r;
+                        let g = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x - twoX, texCoord.y - twoY)).r;
+                        let h = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x, texCoord.y - twoY)).r;
+                        let i = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x + twoX, texCoord.y - twoY)).r;
 
-                        float d = texture(lumSampler, vec2(texCoord.x - twoX, texCoord.y)).r;
-                        float e = texture(lumSampler, vec2(texCoord.x, texCoord.y)).r;
-                        float f = texture(lumSampler, vec2(texCoord.x + twoX, texCoord.y)).r;
+                        let j = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x - x, texCoord.y + y)).r;
+                        let k = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x + x, texCoord.y + y)).r;
+                        let l = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x - x, texCoord.y - y)).r;
+                        let m = textureSample(lumSampler_tex, lumSampler_samp, vec2f(texCoord.x + x, texCoord.y - y)).r;
 
-                        float g = texture(lumSampler, vec2(texCoord.x - twoX, texCoord.y - twoY)).r;
-                        float h = texture(lumSampler, vec2(texCoord.x, texCoord.y - twoY)).r;
-                        float i = texture(lumSampler, vec2(texCoord.x + twoX, texCoord.y - twoY)).r;
-
-                        float j = texture(lumSampler, vec2(texCoord.x - x, texCoord.y + y)).r;
-                        float k = texture(lumSampler, vec2(texCoord.x + x, texCoord.y + y)).r;
-                        float l = texture(lumSampler, vec2(texCoord.x - x, texCoord.y - y)).r;
-                        float m = texture(lumSampler, vec2(texCoord.x + x, texCoord.y - y)).r;
-
-                        outLum = e * 0.125;
+                        var outLum = e * 0.125;
                         outLum += (a + c + g + i) * 0.03125;
                         outLum += (b + d + f + h) * 0.0625;
                         outLum += (j + k + l + m) * 0.125;
+                        return outLum;
                     }
                 "#,
         )

@@ -3,7 +3,7 @@
     resources: [
         (
             name: "depthSampler",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 0
         ),
         (
@@ -62,34 +62,36 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                        @location(1) vertex_tex_coord: vec2f,
+                    }
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec2f,
+                    }
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.tex_coord = input.vertex_tex_coord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out vec4 FragColor;
-
-                    in vec2 texCoord;
-
-                    void main()
-                    {
-                        vec3 fragmentPosition = S_UnProject(vec3(texCoord, texture(depthSampler, texCoord).r), properties.invProj);
-                        float fragmentDepth = length(fragmentPosition);
-                        vec3 viewDirection = fragmentPosition / fragmentDepth;
+                    @fragment fn fs_main(@location(0) tex_coord: vec2f) -> @location(0) vec4f {
+                        let fragmentPosition = S_UnProject(vec3f(tex_coord, textureSample(depthSampler_tex, depthSampler_samp, tex_coord)), properties.invProj);
+                        let fragmentDepth = length(fragmentPosition);
+                        let viewDirection = fragmentPosition / fragmentDepth;
 
                         // Find intersection
-                        vec3 scatter = vec3(0.0);
-                        float minDepth, maxDepth;
-                        if (S_RaySphereIntersection(vec3(0.0), viewDirection, properties.lightPosition, properties.lightRadius, minDepth, maxDepth))
+                        var scatter = vec3f(0.0);
+                        var minDepth: f32;
+                        var maxDepth: f32;
+                        if (S_RaySphereIntersection(vec3f(0.0), viewDirection, properties.lightPosition, properties.lightRadius, &minDepth, &maxDepth))
                         {
                             // Perform depth test.
                             if (minDepth > 0.0 || fragmentDepth > minDepth)
@@ -97,13 +99,13 @@
                                 minDepth = max(minDepth, 0.0);
                                 maxDepth = clamp(maxDepth, 0.0, fragmentDepth);
 
-                                vec3 closestPoint = viewDirection * minDepth;
+                                let closestPoint = viewDirection * minDepth;
 
                                 scatter = properties.scatterFactor * S_InScatter(closestPoint, viewDirection, properties.lightPosition, maxDepth - minDepth);
                             }
                         }
 
-                        FragColor = vec4(properties.lightColor.xyz * pow(clamp(properties.intensity * scatter, 0.0, 1.0), vec3(2.2)), 1.0);
+                        return vec4f(properties.lightColor.xyz * pow(clamp(properties.intensity * scatter, vec3f(0.0), vec3f(1.0)), vec3f(2.2)), 1.0);
                     }
                 "#,
         )

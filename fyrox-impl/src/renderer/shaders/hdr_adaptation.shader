@@ -47,26 +47,30 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertexPosition: vec3f,
+                        @location(1) vertexTexCoord: vec2f,
+                    };
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) texCoord: vec2f,
+                    };
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.texCoord = input.vertexTexCoord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    out float outLum;
-
-                    void main() {
-                        float oldLum = texture(oldLumSampler, vec2(0.5, 0.5)).r;
-                        float newLum = texture(newLumSampler, vec2(0.5, 0.5)).r;
-                        outLum = oldLum + (newLum - oldLum) * properties.speed;
+                    @fragment fn fs_main() -> @location(0) f32 {
+                        let oldLum = textureSample(oldLumSampler_tex, oldLumSampler_samp, vec2f(0.5, 0.5)).r;
+                        let newLum = textureSample(newLumSampler_tex, newLumSampler_samp, vec2f(0.5, 0.5)).r;
+                        return oldLum + (newLum - oldLum) * properties.speed;
                     }
                 "#,
         )

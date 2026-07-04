@@ -41,38 +41,38 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                        @location(1) vertex_tex_coord: vec2f,
+                    }
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec2f,
+                    }
 
-                    void main()
-                    {
-                        texCoord = vertexTexCoord;
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.tex_coord = input.vertex_tex_coord;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
                     // Simple 4x4 box blur.
-                    out float FragColor;
 
-                    in vec2 texCoord;
-
-                    void main()
-                    {
-                        vec2 texelSize = 1.0 / vec2(textureSize(inputTexture, 0));
-                        float result = 0.0;
-                        for (int y = -2; y < 2; ++y)
-                        {
-                            for (int x = -2; x < 2; ++x)
-                            {
-                                vec2 offset = vec2(float(x), float(y)) * texelSize;
-                                result += texture(inputTexture, texCoord + offset).r;
+                    @fragment fn fs_main(@location(0) tex_coord: vec2f) -> @location(0) f32 {
+                        let texel_size = 1.0 / vec2f(textureDimensions(inputTexture_tex, 0));
+                        var result: f32 = 0.0;
+                        for (var y: i32 = -2; y < 2; y++) {
+                            for (var x: i32 = -2; x < 2; x++) {
+                                let offset = vec2f(f32(x), f32(y)) * texel_size;
+                                result += textureSample(inputTexture_tex, inputTexture_samp, tex_coord + offset).r;
                             }
                         }
-                        FragColor = result / 16.0;
+                        return result / 16.0;
                     }
                 "#,
         )

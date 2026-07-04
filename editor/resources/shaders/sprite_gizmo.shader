@@ -61,43 +61,52 @@
             ),
             vertex_shader:
                r#"
-                layout(location = 0) in vec3 vertexPosition;
-                layout(location = 1) in vec2 vertexTexCoord;
-                layout(location = 2) in vec2 vertexParams;
-                layout(location = 3) in vec4 vertexColor;
+                struct VertexInput {
+                    @location(0) vertexPosition: vec3f,
+                    @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexParams: vec2f,
+                    @location(3) vertexColor: vec4f,
+                };
 
-                out vec2 texCoord;
-                out vec4 color;
+                struct VertexOutput {
+                    @builtin(position) position: vec4f,
+                    @location(0) texCoord: vec2f,
+                    @location(1) color: vec4f,
+                };
 
-                void main()
-                {
-                    float size = vertexParams.x;
-                    float rotation = vertexParams.y;
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var output: VertexOutput;
+                    var size = input.vertexParams.x;
+                    var rotation = input.vertexParams.y;
 
-                    texCoord = vertexTexCoord;
-                    color = vertexColor;
-                    vec2 vertexOffset = S_RotateVec2(vertexTexCoord * 2.0 - 1.0, rotation);
-                    vec4 worldPosition = fyrox_instanceData.worldMatrix * vec4(vertexPosition, 1.0);
-                    vec3 offset = (vertexOffset.x * fyrox_cameraData.sideVector + vertexOffset.y * fyrox_cameraData.upVector) * size;
-                    gl_Position = fyrox_cameraData.viewProjectionMatrix * (worldPosition + vec4(offset.x, offset.y, offset.z, 0.0));
+                    output.texCoord = input.vertexTexCoord;
+                    output.color = input.vertexColor;
+                    var vertexOffset = S_RotateVec2(input.vertexTexCoord * 2.0 - 1.0, rotation);
+                    var worldPosition = fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0);
+                    var offset = (vertexOffset.x * fyrox_cameraData.sideVector + vertexOffset.y * fyrox_cameraData.upVector) * size;
+                    output.position = fyrox_cameraData.viewProjectionMatrix * (worldPosition + vec4f(offset.x, offset.y, offset.z, 0.0));
+                    return output;
                 }
                "#,
 
            fragment_shader:
                r#"
-               out vec4 FragColor;
+                struct FragOutput {
+                    @location(0) color: vec4f,
+                    @builtin(frag_depth) depth: f32,
+                };
 
-               in vec2 texCoord;
-               in vec4 color;
+                @fragment
+                fn fs_main(@location(0) texCoord: vec2f, @location(1) color: vec4f, @builtin(position) fragCoord: vec4f) -> FragOutput {
+                    var output: FragOutput;
+                    output.color = color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
 
-               void main()
-               {
-                   FragColor = color * S_SRGBToLinear(texture(diffuseTexture, texCoord));
-
-                   // Pull depth towards near clipping plane so the gizmo will be drawn on top
-                   // of everything, but its parts will be correctly handled by depth test.
-                   gl_FragDepth = gl_FragCoord.z * 0.001;
-               }
+                    // Pull depth towards near clipping plane so the gizmo will be drawn on top
+                    // of everything, but its parts will be correctly handled by depth test.
+                    output.depth = fragCoord.z * 0.001;
+                    return output;
+                }
                "#,
         ),
     ],

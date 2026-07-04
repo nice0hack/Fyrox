@@ -3,7 +3,7 @@
     resources: [
         (
             name: "depthTexture",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 0
         ),
         (
@@ -23,17 +23,17 @@
         ),
         (
             name: "shadowCascade0",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 4
         ),
         (
             name: "shadowCascade1",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 5
         ),
         (
             name: "shadowCascade2",
-            kind: Texture(kind: Sampler2D, fallback: White),
+            kind: Texture(kind: DepthSampler2D, fallback: White),
             binding: 6
         ),
         (
@@ -93,61 +93,61 @@
 
             vertex_shader:
                 r#"
-                    layout (location = 0) in vec3 vertexPosition;
-                    layout (location = 1) in vec2 vertexTexCoord;
+                    struct VertexInput {
+                        @location(0) vertex_position: vec3f,
+                        @location(1) vertex_tex_coord: vec2f,
+                    }
 
-                    out vec2 texCoord;
+                    struct VertexOutput {
+                        @builtin(position) position: vec4f,
+                        @location(0) tex_coord: vec2f,
+                    }
 
-                    void main()
-                    {
-                        gl_Position = properties.worldViewProjection * vec4(vertexPosition, 1.0);
-                        texCoord = vertexTexCoord;
+                    @vertex fn vs_main(input: VertexInput) -> VertexOutput {
+                        var output: VertexOutput;
+                        output.position = properties.worldViewProjection * vec4f(input.vertex_position, 1.0);
+                        output.tex_coord = input.vertex_tex_coord;
+                        return output;
                     }
                 "#,
 
             fragment_shader:
                 r#"
-                    in vec2 texCoord;
-                    out vec4 FragColor;
+                    @fragment fn fs_main(@location(0) tex_coord: vec2f) -> @location(0) vec4f {
+                        let material = textureSample(materialTexture_tex, materialTexture_samp, tex_coord).rgb;
 
-                    // Returns **inverted** shadow factor where 1 - fully bright, 0 - fully in shadow.
-                    float CsmGetShadow(in sampler2D sampler, in vec3 fragmentPosition, in mat4 lightViewProjMatrix)
-                    {
-                        float invSize = 1.0 / float(textureSize(sampler, 0).x);
-                        return S_SpotShadowFactor(properties.shadowsEnabled, properties.softShadows,
-                            properties.shadowBias, fragmentPosition, lightViewProjMatrix, invSize, sampler);
-                    }
+                        let fragment_position = S_UnProject(vec3f(tex_coord, textureSample(depthTexture_tex, depthTexture_samp, tex_coord)), properties.invViewProj);
+                        let diffuse_color = textureSample(colorTexture_tex, colorTexture_samp, tex_coord);
 
-                    void main()
-                    {
-                        vec3 material = texture(materialTexture, texCoord).rgb;
-
-                        vec3 fragmentPosition = S_UnProject(vec3(texCoord, texture(depthTexture, texCoord).r), properties.invViewProj);
-                        vec4 diffuseColor = texture(colorTexture, texCoord);
-
-                        TPBRContext ctx;
-                        ctx.albedo = S_SRGBToLinear(diffuseColor).rgb;
+                        var ctx: TPBRContext;
+                        ctx.albedo = S_SRGBToLinear(diffuse_color).rgb;
                         ctx.fragmentToLight = properties.lightDirection;
-                        ctx.fragmentNormal = normalize(texture(normalTexture, texCoord).xyz * 2.0 - 1.0);
+                        ctx.fragmentNormal = normalize(textureSample(normalTexture_tex, normalTexture_samp, tex_coord).xyz * 2.0 - 1.0);
                         ctx.lightColor = properties.lightColor.rgb;
                         ctx.metallic = material.x;
                         ctx.roughness = material.y;
-                        ctx.viewVector = normalize(properties.cameraPosition - fragmentPosition);
+                        ctx.viewVector = normalize(properties.cameraPosition - fragment_position);
 
-                        vec3 lighting = S_PBR_CalculateLight(ctx);
+                        let lighting = S_PBR_CalculateLight(ctx);
 
-                        float fragmentZViewSpace = abs((properties.viewMatrix * vec4(fragmentPosition, 1.0)).z);
+                        let fragment_z_view_space = abs((properties.viewMatrix * vec4f(fragment_position, 1.0)).z);
 
-                        float shadow = 1.0;
-                        if (fragmentZViewSpace <= properties.cascadeDistances[0]) {
-                            shadow = CsmGetShadow(shadowCascade0, fragmentPosition, properties.lightViewProjMatrices[0]);
-                        } else if (fragmentZViewSpace <= properties.cascadeDistances[1]) {
-                            shadow = CsmGetShadow(shadowCascade1, fragmentPosition, properties.lightViewProjMatrices[1]);
-                        } else if (fragmentZViewSpace <= properties.cascadeDistances[2]) {
-                            shadow = CsmGetShadow(shadowCascade2, fragmentPosition, properties.lightViewProjMatrices[2]);
+                        var shadow: f32 = 1.0;
+                        if (fragment_z_view_space <= properties.cascadeDistances[0].x) {
+                            let inv_size = 1.0 / f32(textureDimensions(shadowCascade0_tex).x);
+                            shadow = S_SpotShadowFactor_Depth(properties.shadowsEnabled != 0u, properties.softShadows != 0u,
+                                properties.shadowBias, fragment_position, properties.lightViewProjMatrices[0], inv_size, shadowCascade0_tex, shadowCascade0_samp);
+                        } else if (fragment_z_view_space <= properties.cascadeDistances[1].x) {
+                            let inv_size = 1.0 / f32(textureDimensions(shadowCascade1_tex).x);
+                            shadow = S_SpotShadowFactor_Depth(properties.shadowsEnabled != 0u, properties.softShadows != 0u,
+                                properties.shadowBias, fragment_position, properties.lightViewProjMatrices[1], inv_size, shadowCascade1_tex, shadowCascade1_samp);
+                        } else if (fragment_z_view_space <= properties.cascadeDistances[2].x) {
+                            let inv_size = 1.0 / f32(textureDimensions(shadowCascade2_tex).x);
+                            shadow = S_SpotShadowFactor_Depth(properties.shadowsEnabled != 0u, properties.softShadows != 0u,
+                                properties.shadowBias, fragment_position, properties.lightViewProjMatrices[2], inv_size, shadowCascade2_tex, shadowCascade2_samp);
                         }
 
-                        FragColor = shadow * vec4(properties.lightIntensity * lighting, diffuseColor.a);
+                        return shadow * vec4f(properties.lightIntensity * lighting, diffuse_color.a);
                     }
                 "#,
         )

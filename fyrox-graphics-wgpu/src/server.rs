@@ -65,6 +65,10 @@ pub struct WgpuGraphicsServer {
     weak_self: RefCell<Option<Weak<WgpuGraphicsServer>>>,
     pub memory_usage: RefCell<ServerMemoryUsage>,
     pipeline_statistics: RefCell<PipelineStatistics>,
+    /// Small buffer bound to extra vertex slots when geometry lacks attributes the shader expects.
+    pub dummy_vertex_buffer: wgpu::Buffer,
+    /// Non-filtering sampler for textures with non-filterable formats (e.g. R32Float).
+    non_filtering_sampler: wgpu::Sampler,
 }
 
 impl WgpuGraphicsServer {
@@ -157,6 +161,21 @@ impl WgpuGraphicsServer {
         // TODO: Force `msaa_sample_count` to 1 in the wgpu backend. Full MSAA support requires creating multisampled render targets and resolve targets, which is a larger feature.
         let msaa = 1u32; // msaa_sample_count.unwrap_or(1).max(1) as u32;
 
+        let non_filtering_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("NonFilteringSampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let dummy_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DummyVB"),
+            size: 16, // enough for vec4f
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+
         let server = Rc::new(Self {
             state: Arc::new(WgpuState { instance, adapter, device, queue }),
             surface,
@@ -167,6 +186,8 @@ impl WgpuGraphicsServer {
             weak_self: RefCell::new(None),
             memory_usage: RefCell::new(ServerMemoryUsage::default()),
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),
+            dummy_vertex_buffer,
+            non_filtering_sampler,
         });
 
         *server.weak_self.borrow_mut() = Some(Rc::downgrade(&server));
@@ -176,6 +197,9 @@ impl WgpuGraphicsServer {
 
     pub fn weak_ref(&self) -> Weak<WgpuGraphicsServer> {
         self.weak_self.borrow().clone().unwrap()
+    }
+    pub fn non_filtering_sampler(&self) -> &wgpu::Sampler {
+        &self.non_filtering_sampler
     }
 }
 
