@@ -274,7 +274,9 @@ impl WgpuFrameBuffer {
 
         let (offset, count) = match element_range { ElementRange::Full => (0, geo.element_count()), ElementRange::Specific { offset, count } => (offset, count) };
         if offset + count > geo.element_count() { return Err(FrameworkError::InvalidElementRange { start: offset, end: offset + count, total: geo.element_count() }); }
-        if count == 0 { return Ok(DrawCallStatistics { triangles: 0 }); }
+        // Don't early-return when count==0 - we still need to create the render pass to consume
+        // pending clear operations on the framebuffer. Without this, stale content remains in the
+        // FBO when all geometry is culled (e.g. selected nodes not in camera frustum).
 
         let surface_tex = if self.is_backbuffer {
             // Only acquire a new frame if one isn't already stored from a prior draw call this frame.

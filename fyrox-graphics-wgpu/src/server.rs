@@ -297,11 +297,22 @@ impl GraphicsServer for WgpuGraphicsServer {
     }
     fn set_frame_size(&self, new_size: (u32, u32)) {
         if new_size.0 > 0 && new_size.1 > 0 {
+            // Clear any pending frame before reconfiguring surface to avoid semaphore issues.
+            // The semaphore from a pending frame may still be in use by the GPU.
+            if let Some(frame) = self.current_frame.borrow_mut().take() {
+                frame.present();
+            }
+
             let mut config = self.surface_config.write().unwrap();
             let old_format = config.format;
             config.width = new_size.0;
             config.height = new_size.1;
             self.surface.configure(&self.state.device, &config);
+
+            // Invalidate depth stencil cache - it is sized for the OLD surface dimensions.
+            // Next call to back_buffer() will recreate it with correct size.
+            *self.backbuffer_depth_stencil.borrow_mut() = None;
+
             // Invalidate pipeline cache if the surface format changed (e.g. DPI/monitor switch).
             if config.format != old_format {
                 self.pipeline_cache.borrow_mut().clear();

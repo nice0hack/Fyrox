@@ -741,6 +741,11 @@ impl Renderer {
 
         self.graphics_server().set_frame_size(new_size);
 
+        // Recreate backbuffer to get properly-sized depth stencil.
+        // set_frame_size() invalidated the depth stencil cache, so back_buffer()
+        // will create a new depth stencil with the correct dimensions.
+        self.backbuffer = self.graphics_server().back_buffer();
+
         Ok(())
     }
 

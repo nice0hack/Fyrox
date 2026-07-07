@@ -96,7 +96,7 @@
                             fragColor = mix(fyrox_widgetData.gradientColors[current], fyrox_widgetData.gradientColors[next], mix_factor);
                         }
 
-                        let diffuseColor = textureSample(fyrox_widgetTexture_tex, fyrox_widgetTexture_samp, texCoord);
+                        let diffuseColor = S_SRGBToLinear(textureSample(fyrox_widgetTexture_tex, fyrox_widgetTexture_samp, texCoord));
 
                         if (fyrox_widgetData.isFont != 0u) {
                             fragColor.a *= diffuseColor.r;
