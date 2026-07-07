@@ -125,6 +125,16 @@ fn texture_format_for_attachment(tex: &GpuTexture) -> wgpu::TextureFormat {
     tex.as_any().downcast_ref::<WgpuTexture>().unwrap().format()
 }
 
+fn color_mask_to_wgpu(mask: &fyrox_graphics::ColorMask) -> wgpu::ColorWrites {
+    use wgpu::ColorWrites as CW;
+    let mut result = CW::empty();
+    if mask.red { result |= CW::RED; }
+    if mask.green { result |= CW::GREEN; }
+    if mask.blue { result |= CW::BLUE; }
+    if mask.alpha { result |= CW::ALPHA; }
+    result
+}
+
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct PipelineKey {
     program_ptr: usize,
@@ -138,6 +148,8 @@ pub struct PipelineKey {
     has_color: bool,
     cull: u8,
     extra_vert_count: u8,
+    color_write: u32,
+    stencil_write_mask: u32,
 }
 
 pub struct WgpuFrameBuffer {
@@ -171,6 +183,8 @@ impl WgpuFrameBuffer {
             has_color,
             cull: match params.cull_face { Some(CullFace::Back) => 2, Some(CullFace::Front) => 1, None => 0 },
             extra_vert_count: all_layouts.len() as u8,
+            color_write: color_mask_to_wgpu(&params.color_write).bits(),
+            stencil_write_mask: params.stencil_op.write_mask,
         };
         let key_hash = { let mut h = DefaultHasher::new(); key.hash(&mut h); h.finish() };
         { let cache = server.pipeline_cache.borrow(); if let Some(p) = cache.get(&key_hash) { return p.clone(); } }
@@ -235,7 +249,8 @@ impl WgpuFrameBuffer {
             fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
         };
 
-        let color_target = [Some(wgpu::ColorTargetState { format: cf, blend: blend_state, write_mask: wgpu::ColorWrites::ALL })];
+        let color_write_mask = wgpu::ColorWrites::from_bits_retain(key.color_write);
+        let color_target = [Some(wgpu::ColorTargetState { format: cf, blend: blend_state, write_mask: color_write_mask })];
         let fragment_state = if has_color { Some(wgpu::FragmentState { module: program.fragment_module(), entry_point: Some("fs_main"), targets: &color_target, compilation_options: Default::default() }) } else { None };
         let pipeline = server.state.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("RP"), layout: Some(pipeline_layout),
@@ -456,11 +471,17 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
 
 /// Expected vertex attribute locations that the standard shaders may need but
 /// geometry might not provide (e.g. boneWeights, boneIndices, vertexSecondTexCoord).
-const EXTRA_VERTEX_ATTRS: &[(u32, wgpu::VertexFormat)] = &[
+const EXTRA_VERTEX_ATTRS: &[(u32, wgpu::VertexFormat); 3] = &[
     (4, wgpu::VertexFormat::Float32x4), // boneWeights
     (5, wgpu::VertexFormat::Float32x4), // boneIndices
     (6, wgpu::VertexFormat::Float32x2), // vertexSecondTexCoord
 ];
+
+/// Cached leaked attribute slices, one per EXTRA_VERTEX_ATTRS index.
+/// Each slot leaks its Box once on first use and returns the static reference thereafter.
+fn make_extra_attr(attrs: Vec<wgpu::VertexAttribute>) -> &'static [wgpu::VertexAttribute] {
+    Box::leak(attrs.into_boxed_slice())
+}
 
 /// Builds the full vertex buffer layout list, adding dummy entries for attributes
 /// the shader expects but the geometry doesn't provide. Returns (layouts, extra_count).
@@ -474,10 +495,11 @@ fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayo
     let mut extra = 0u32;
     for &(loc, fmt) in EXTRA_VERTEX_ATTRS {
         if !provided.contains(&loc) {
+            let attrs = vec![wgpu::VertexAttribute { format: fmt, offset: 0, shader_location: loc }];
             all.push(wgpu::VertexBufferLayout {
                 array_stride: 0,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: Box::leak(vec![wgpu::VertexAttribute { format: fmt, offset: 0, shader_location: loc }].into_boxed_slice()),
+                attributes: make_extra_attr(attrs),
             });
             extra += 1;
         }

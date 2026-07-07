@@ -146,13 +146,14 @@ impl WgpuGraphicsServer {
         .map_err(|e| FrameworkError::Custom(format!("Failed to request device: {e}")))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // Prefer linear (non-sRGB) formats to avoid double gamma correction.
-        // The engine applies its own gamma correction in the HDR tone-mapping pass.
+        // Prefer sRGB surface format to match the GL backend (which uses sRGB FBOs).
+        // The engine applies HDR tone-mapping in-shader; picking linear here would
+        // cause output to appear doubly-dark/over-saturated.
         let surface_format = surface_caps
             .formats
             .iter()
             .copied()
-            .find(|f| !f.is_srgb())
+            .find(|f| f.is_srgb())
             .or_else(|| surface_caps.formats.first().copied())
             .ok_or_else(|| FrameworkError::Custom("Surface has no supported formats".into()))?;
 
@@ -297,9 +298,14 @@ impl GraphicsServer for WgpuGraphicsServer {
     fn set_frame_size(&self, new_size: (u32, u32)) {
         if new_size.0 > 0 && new_size.1 > 0 {
             let mut config = self.surface_config.write().unwrap();
+            let old_format = config.format;
             config.width = new_size.0;
             config.height = new_size.1;
             self.surface.configure(&self.state.device, &config);
+            // Invalidate pipeline cache if the surface format changed (e.g. DPI/monitor switch).
+            if config.format != old_format {
+                self.pipeline_cache.borrow_mut().clear();
+            }
         }
     }
     fn capabilities(&self) -> ServerCapabilities {

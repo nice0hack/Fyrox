@@ -179,22 +179,15 @@ impl GpuShaderTrait for WgpuShader {}
 
 impl WgpuShader {
     pub fn new(server: &WgpuGraphicsServer, name: String, kind: ShaderKind, source: String, resources: &[ShaderResourceDefinition], _line_offset: isize) -> Result<Self, FrameworkError> {
+        // Check for duplicate resource names (binding conflicts are caught by wgpu at pipeline creation time).
+        let mut seen_names = std::collections::HashSet::new();
         for r in resources {
-            for o in resources {
-                if std::ptr::eq(r, o) { continue; }
-                if std::mem::discriminant(&r.kind) == std::mem::discriminant(&o.kind) {
-                    if r.binding == o.binding { return Err(FrameworkError::Custom(format!("Resource {} and {} same binding {}", r.name, o.name, r.binding))); }
-                    if r.name == o.name { return Err(FrameworkError::Custom(format!("Duplicate resource name {}", r.name))); }
-                }
+            if !seen_names.insert(&r.name) {
+                return Err(FrameworkError::Custom(format!("Duplicate resource name {}", r.name)));
             }
         }
 
         let declarations = generate_wgsl_declarations(resources);
-        if name.contains("Widget") {
-            use std::io::Write;
-            let mut f = std::fs::File::create("C:\\Users\\I.Kondrashkin\\projects\\Fyrox\\shader_dump.txt").unwrap();
-            writeln!(f, "=== DECLS for {name} ===\n{declarations}=== SOURCE ===\n{source}").ok();
-        }
         let shared = include_str!("shaders/shared.wgsl");
 
         let mut wgsl = String::new();
