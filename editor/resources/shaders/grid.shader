@@ -101,7 +101,7 @@
                 @vertex
                 fn vs_main(input: VertexInput) -> VertexOutput {
                     var output: VertexOutput;
-                    var invViewProj = inverse(fyrox_cameraData.viewProjectionMatrix);
+                    var invViewProj = inverse_mat4(fyrox_cameraData.viewProjectionMatrix);
                     output.nearPoint = Unproject(input.vertexPosition.x, input.vertexPosition.y, 0.0, invViewProj);
                     output.farPoint = Unproject(input.vertexPosition.x, input.vertexPosition.y, 1.0, invViewProj);
                     output.position = vec4f(input.vertexPosition, 1.0);

@@ -143,6 +143,7 @@
             vertex_shader:
                 r#"
                 struct VertexInput {
+                    @builtin(vertex_index) vertex_index: u32,
                     @location(0) vertexPosition: vec3f,
                     @location(1) vertexTexCoord: vec2f,
                     @location(2) vertexNormal: vec3f,
@@ -175,7 +176,7 @@
                     var inputTangent = input.vertexTangent.xyz;
 
                     for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
-                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage_tex, blendShapesStorage_samp, i32(input.vertex_index), i);
                         var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
                         inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                         inputNormal += offsets.normal * weight;
@@ -326,10 +327,14 @@
             vertex_shader:
                r#"
                 struct VertexInput {
+                    @builtin(vertex_index) vertex_index: u32,
                     @location(0) vertexPosition: vec3f,
                     @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexNormal: vec3f,
+                    @location(3) vertexTangent: vec4f,
                     @location(4) boneWeights: vec4f,
                     @location(5) boneIndices: vec4f,
+                    @location(6) vertexSecondTexCoord: vec2f,
                 };
 
                 struct VertexOutput {
@@ -347,7 +352,7 @@
                     var inputPosition = vec4f(input.vertexPosition, 1.0);
 
                     for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
-                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage_tex, blendShapesStorage_samp, i32(input.vertex_index), i);
                         var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
                         inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
@@ -415,10 +420,14 @@
             vertex_shader:
                 r#"
                 struct VertexInput {
+                    @builtin(vertex_index) vertex_index: u32,
                     @location(0) vertexPosition: vec3f,
                     @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexNormal: vec3f,
+                    @location(3) vertexTangent: vec4f,
                     @location(4) boneWeights: vec4f,
                     @location(5) boneIndices: vec4f,
+                    @location(6) vertexSecondTexCoord: vec2f,
                 };
 
                 struct VertexOutput {
@@ -435,7 +444,7 @@
                     var inputPosition = vec4f(input.vertexPosition, 1.0);
 
                     for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
-                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage_tex, blendShapesStorage_samp, i32(input.vertex_index), i);
                         var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
                         inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
@@ -500,10 +509,14 @@
             vertex_shader:
                 r#"
                 struct VertexInput {
+                    @builtin(vertex_index) vertex_index: u32,
                     @location(0) vertexPosition: vec3f,
                     @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexNormal: vec3f,
+                    @location(3) vertexTangent: vec4f,
                     @location(4) boneWeights: vec4f,
                     @location(5) boneIndices: vec4f,
+                    @location(6) vertexSecondTexCoord: vec2f,
                 };
 
                 struct VertexOutput {
@@ -520,7 +533,7 @@
                     var inputPosition = vec4f(input.vertexPosition, 1.0);
 
                     for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
-                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage_tex, blendShapesStorage_samp, i32(input.vertex_index), i);
                         var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
                         inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }
@@ -585,10 +598,14 @@
             vertex_shader:
                 r#"
                 struct VertexInput {
+                    @builtin(vertex_index) vertex_index: u32,
                     @location(0) vertexPosition: vec3f,
                     @location(1) vertexTexCoord: vec2f,
+                    @location(2) vertexNormal: vec3f,
+                    @location(3) vertexTangent: vec4f,
                     @location(4) boneWeights: vec4f,
                     @location(5) boneIndices: vec4f,
+                    @location(6) vertexSecondTexCoord: vec2f,
                 };
 
                 struct VertexOutput {
@@ -606,7 +623,7 @@
                     var inputPosition = vec4f(input.vertexPosition, 1.0);
 
                     for (var i: i32 = 0; i < fyrox_instanceData.blendShapesCount; i++) {
-                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage, vertex_index, i);
+                        var offsets = S_FetchBlendShapeOffsets(blendShapesStorage_tex, blendShapesStorage_samp, i32(input.vertex_index), i);
                         var weight = fyrox_instanceData.blendShapesWeights[i / 4][i % 4];
                         inputPosition = vec4f(inputPosition.xyz + offsets.position * weight, inputPosition.w);
                     }

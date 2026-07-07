@@ -236,19 +236,22 @@ impl GraphicsServer for WgpuGraphicsServer {
             None => true,
         };
         if needs_recreate {
-            let depth_tex = match self.create_2d_render_target(
-                "BackbufferDepthStencil",
-                fyrox_graphics::gpu_texture::PixelKind::D24S8,
-                w as usize,
-                h as usize,
-            ) {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("Failed to create backbuffer depth-stencil: {e}");
-                    return GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self, None)));
+            if w > 0 && h > 0 {
+                match self.create_2d_render_target(
+                    "BackbufferDepthStencil",
+                    fyrox_graphics::gpu_texture::PixelKind::D24S8,
+                    w as usize,
+                    h as usize,
+                ) {
+                    Ok(tex) => { *cache = Some((w, h, tex)); }
+                    Err(e) => {
+                        log::warn!("Failed to create backbuffer depth-stencil: {e}");
+                        *cache = None;
+                    }
                 }
-            };
-            *cache = Some((w, h, depth_tex));
+            } else {
+                *cache = None;
+            }
         }
         let depth_attachment = cache.as_ref().map(|(_, _, tex)| Attachment::depth_stencil(tex.clone()));
         GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self, depth_attachment)))

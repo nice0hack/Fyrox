@@ -136,7 +136,9 @@ impl WgpuTexture {
     pub fn new(server: &WgpuGraphicsServer, desc: GpuTextureDescriptor) -> Result<Self, FrameworkError> {
         let format = pixel_kind_to_wgpu_format(desc.pixel_kind);
         let dimension = texture_dimension(desc.kind);
-        let (width, height, depth_or_layers) = texture_size(desc.kind);
+        let (raw_w, raw_h, depth_or_layers) = texture_size(desc.kind);
+        let width = raw_w.max(1);
+        let height = raw_h.max(1);
         let mip_count = desc.mip_count.max(1) as u32;
 
         let texture = server.state.device.create_texture(&wgpu::TextureDescriptor {

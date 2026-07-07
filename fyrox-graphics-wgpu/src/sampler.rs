@@ -63,17 +63,19 @@ impl GpuSamplerTrait for WgpuSampler {}
 
 impl WgpuSampler {
     pub fn new(server: &WgpuGraphicsServer, desc: GpuSamplerDescriptor) -> Result<Self, FrameworkError> {
+        let aniso = desc.anisotropy.clamp(1.0, 16.0) as u16;
+        let use_linear = aniso > 1;
         let sampler = server.state.device.create_sampler(&wgpu::SamplerDescriptor {
             label: if server.named_objects { Some("Sampler") } else { None },
             address_mode_u: wrap_mode_to_wgpu(desc.s_wrap_mode),
             address_mode_v: wrap_mode_to_wgpu(desc.t_wrap_mode),
             address_mode_w: wrap_mode_to_wgpu(desc.r_wrap_mode),
-            mag_filter: mag_filter_to_wgpu(desc.mag_filter),
-            min_filter: min_filter_to_wgpu(desc.min_filter),
-            mipmap_filter: mipmap_filter_to_wgpu(desc.min_filter),
+            mag_filter: if use_linear { wgpu::FilterMode::Linear } else { mag_filter_to_wgpu(desc.mag_filter) },
+            min_filter: if use_linear { wgpu::FilterMode::Linear } else { min_filter_to_wgpu(desc.min_filter) },
+            mipmap_filter: if use_linear { wgpu::MipmapFilterMode::Linear } else { mipmap_filter_to_wgpu(desc.min_filter) },
             lod_min_clamp: desc.min_lod.max(0.0),
             lod_max_clamp: desc.max_lod.max(0.0),
-            anisotropy_clamp: desc.anisotropy.clamp(1.0, 16.0) as u16,
+            anisotropy_clamp: aniso,
             compare: None,
             border_color: None,
         });

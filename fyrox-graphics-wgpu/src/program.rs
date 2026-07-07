@@ -55,7 +55,7 @@ fn wgsl_property_type(kind: &ShaderPropertyKind) -> String {
         ShaderPropertyKind::UIntArray { max_len, .. } => format!("array<vec4u, {max_len}>"),
         ShaderPropertyKind::Bool { .. } => "u32".into(),
         ShaderPropertyKind::Vector2 { .. } => "vec2f".into(),
-        ShaderPropertyKind::Vector2Array { max_len, .. } => format!("array<vec2f, {max_len}>"),
+        ShaderPropertyKind::Vector2Array { max_len, .. } => format!("array<vec4f, {max_len}>"),
         ShaderPropertyKind::Vector3 { .. } => "vec3f".into(),
         ShaderPropertyKind::Vector3Array { max_len, .. } => format!("array<vec3f, {max_len}>"),
         ShaderPropertyKind::Vector4 { .. } => "vec4f".into(),

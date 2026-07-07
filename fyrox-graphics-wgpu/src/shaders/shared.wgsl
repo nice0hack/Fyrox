@@ -3,6 +3,48 @@
 
 const PI: f32 = 3.14159;
 
+fn inverse_mat4(m: mat4x4f) -> mat4x4f {
+    let m00 = m[0][0]; let m01 = m[0][1]; let m02 = m[0][2]; let m03 = m[0][3];
+    let m10 = m[1][0]; let m11 = m[1][1]; let m12 = m[1][2]; let m13 = m[1][3];
+    let m20 = m[2][0]; let m21 = m[2][1]; let m22 = m[2][2]; let m23 = m[2][3];
+    let m30 = m[3][0]; let m31 = m[3][1]; let m32 = m[3][2]; let m33 = m[3][3];
+
+    let b00 = m00 * m11 - m01 * m10;
+    let b01 = m00 * m12 - m02 * m10;
+    let b02 = m00 * m13 - m03 * m10;
+    let b03 = m01 * m12 - m02 * m11;
+    let b04 = m01 * m13 - m03 * m11;
+    let b05 = m02 * m13 - m03 * m12;
+    let b06 = m20 * m31 - m21 * m30;
+    let b07 = m20 * m32 - m22 * m30;
+    let b08 = m20 * m33 - m23 * m30;
+    let b09 = m21 * m32 - m22 * m31;
+    let b10 = m21 * m33 - m23 * m31;
+    let b11 = m22 * m33 - m23 * m32;
+
+    var inv = mat4x4f();
+    inv[0][0] = m11 * b11 - m12 * b10 + m13 * b09;
+    inv[0][1] = m02 * b10 - m01 * b11 - m03 * b09;
+    inv[0][2] = m31 * b05 - m32 * b04 + m33 * b03;
+    inv[0][3] = m22 * b04 - m21 * b05 - m23 * b03;
+    inv[1][0] = m12 * b08 - m10 * b11 - m13 * b07;
+    inv[1][1] = m00 * b11 - m02 * b08 + m03 * b07;
+    inv[1][2] = m32 * b02 - m30 * b05 - m33 * b01;
+    inv[1][3] = m20 * b05 - m22 * b02 + m23 * b01;
+    inv[2][0] = m10 * b10 - m11 * b08 + m13 * b06;
+    inv[2][1] = m01 * b08 - m00 * b10 - m03 * b06;
+    inv[2][2] = m30 * b04 - m31 * b02 + m33 * b00;
+    inv[2][3] = m21 * b02 - m20 * b04 - m23 * b00;
+    inv[3][0] = m11 * b07 - m10 * b09 - m12 * b06;
+    inv[3][1] = m00 * b09 - m01 * b07 + m02 * b06;
+    inv[3][2] = m31 * b01 - m30 * b03 - m32 * b00;
+    inv[3][3] = m20 * b03 - m21 * b01 + m22 * b00;
+
+    let det = m00 * b00 + m01 * b08 + m02 * b06 + m03 * b09;
+    let invDet = 1.0 / det;
+    return inv * invDet;
+}
+
 fn S_SolveQuadraticEq(a: f32, b: f32, c: f32, minT: ptr<function, f32>, maxT: ptr<function, f32>) -> bool {
     let twoA = 2.0 * a;
     let det = b * b - 2.0 * twoA * c;

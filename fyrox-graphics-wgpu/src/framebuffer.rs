@@ -30,7 +30,7 @@ use fyrox_graphics::{
     framebuffer::{Attachment, BufferDataUsage, DrawCallStatistics, GpuFrameBuffer, GpuFrameBufferTrait, ReadTarget, ResourceBindGroup, ResourceBinding},
     geometry_buffer::GpuGeometryBuffer,
     gpu_program::GpuProgram,
-    gpu_texture::{image_2d_size_bytes, CubeMapFace, GpuTexture, GpuTextureKind},
+    gpu_texture::{CubeMapFace, GpuTexture, GpuTextureKind},
     CompareFunc, CullFace, DrawParameters, ElementRange, BlendMode,
 };
 use std::cell::{Cell, RefCell};
@@ -135,6 +135,7 @@ pub struct PipelineKey {
     depth_test: bool,
     depth_write: bool,
     stencil: bool,
+    has_color: bool,
     cull: u8,
     extra_vert_count: u8,
 }
@@ -158,7 +159,7 @@ impl WgpuFrameBuffer {
         Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: Default::default(), is_backbuffer: true, needs_clear: Cell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0) }
     }
 
-    fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind) -> wgpu::RenderPipeline {
+    fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind, has_color: bool) -> wgpu::RenderPipeline {
         let needs_stencil = params.stencil_test.is_some() || params.stencil_op.zpass != fyrox_graphics::StencilAction::Keep || params.stencil_op.fail != fyrox_graphics::StencilAction::Keep || params.stencil_op.zfail != fyrox_graphics::StencilAction::Keep;
         let depth_fmt = df.unwrap_or(wgpu::TextureFormat::Depth32Float);
         let stencil_supported = format_has_stencil(depth_fmt);
@@ -167,15 +168,30 @@ impl WgpuFrameBuffer {
             program_ptr: program as *const WgpuProgram as usize, color_format: cf, depth_format: df, sample_count: server.msaa_sample_count,
             blend: params.blend.is_some(), depth_test: params.depth_test.is_some(), depth_write: params.depth_write,
             stencil: effective_stencil,
+            has_color,
             cull: match params.cull_face { Some(CullFace::Back) => 2, Some(CullFace::Front) => 1, None => 0 },
             extra_vert_count: all_layouts.len() as u8,
         };
         let key_hash = { let mut h = DefaultHasher::new(); key.hash(&mut h); h.finish() };
         { let cache = server.pipeline_cache.borrow(); if let Some(p) = cache.get(&key_hash) { return p.clone(); } }
 
-        let blend_state = params.blend.as_ref().map(|bp| wgpu::BlendState {
-            color: wgpu::BlendComponent { src_factor: blend_factor_to_wgpu(bp.func.sfactor), dst_factor: blend_factor_to_wgpu(bp.func.dfactor), operation: blend_mode_to_wgpu(bp.equation.rgb) },
-            alpha: wgpu::BlendComponent { src_factor: blend_factor_to_wgpu(bp.func.alpha_sfactor), dst_factor: blend_factor_to_wgpu(bp.func.alpha_dfactor), operation: blend_mode_to_wgpu(bp.equation.alpha) },
+        let blend_state = params.blend.as_ref().map(|bp| {
+            let rgb_op = blend_mode_to_wgpu(bp.equation.rgb);
+            let alpha_op = blend_mode_to_wgpu(bp.equation.alpha);
+            let is_minmax_rgb = matches!(rgb_op, wgpu::BlendOperation::Min | wgpu::BlendOperation::Max);
+            let is_minmax_alpha = matches!(alpha_op, wgpu::BlendOperation::Min | wgpu::BlendOperation::Max);
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: if is_minmax_rgb { wgpu::BlendFactor::One } else { blend_factor_to_wgpu(bp.func.sfactor) },
+                    dst_factor: if is_minmax_rgb { wgpu::BlendFactor::One } else { blend_factor_to_wgpu(bp.func.dfactor) },
+                    operation: rgb_op,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: if is_minmax_alpha { wgpu::BlendFactor::One } else { blend_factor_to_wgpu(bp.func.alpha_sfactor) },
+                    dst_factor: if is_minmax_alpha { wgpu::BlendFactor::One } else { blend_factor_to_wgpu(bp.func.alpha_dfactor) },
+                    operation: alpha_op,
+                },
+            }
         });
 
         let wgpu_stencil_state = if effective_stencil {
@@ -219,10 +235,12 @@ impl WgpuFrameBuffer {
             fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
         };
 
+        let color_target = [Some(wgpu::ColorTargetState { format: cf, blend: blend_state, write_mask: wgpu::ColorWrites::ALL })];
+        let fragment_state = if has_color { Some(wgpu::FragmentState { module: program.fragment_module(), entry_point: Some("fs_main"), targets: &color_target, compilation_options: Default::default() }) } else { None };
         let pipeline = server.state.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("RP"), layout: Some(pipeline_layout),
             vertex: wgpu::VertexState { module: program.vertex_module(), entry_point: Some("vs_main"), buffers: all_layouts, compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: program.fragment_module(), entry_point: Some("fs_main"), targets: &[Some(wgpu::ColorTargetState { format: cf, blend: blend_state, write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
+            fragment: fragment_state,
             primitive: wgpu::PrimitiveState { topology: topo, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: cull, ..Default::default() },
             depth_stencil,
             multisample: wgpu::MultisampleState { count: server.msaa_sample_count, mask: !0, alpha_to_coverage_enabled: false },
@@ -287,27 +305,29 @@ impl WgpuFrameBuffer {
         let (_, pipeline_layout) = prog.get_or_create_layouts(&texture_formats);
 
         let (all_layouts, extra_vert_count) = build_vertex_layouts(geo);
-        let pipeline = self.get_or_create_pipeline(&server, prog, params, &all_layouts, cf, df, &pipeline_layout, geo.element_kind());
+        let has_color = self.is_backbuffer || !self.color_attachments.is_empty();
+        let pipeline = self.get_or_create_pipeline(&server, prog, params, &all_layouts, cf, df, &pipeline_layout, geo.element_kind(), has_color);
 
         let bind_group = create_bind_group(&server, prog, resources);
         let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("DrawEnc") });
 
         let color_view = if self.is_backbuffer {
-            surface_tex.unwrap()
+            Some(surface_tex.unwrap())
         } else {
-            let first_color = self.color_attachments.first().unwrap();
-            if let Some(face) = first_color.cube_map_face() {
-                let wt = first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
-                wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: cubemap_face_to_layer(face),
-                    array_layer_count: Some(1),
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                })
-            } else {
-                first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone()
-            }
+            self.color_attachments.first().map(|first_color| {
+                if let Some(face) = first_color.cube_map_face() {
+                    let wt = first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+                    wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: cubemap_face_to_layer(face),
+                        array_layer_count: Some(1),
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                } else {
+                    first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone()
+                }
+            })
         };
 
         let depth_view = self.depth_attachment.as_ref().map(|a| {
@@ -336,9 +356,11 @@ impl WgpuFrameBuffer {
             } else {
                 (wgpu::LoadOp::Load, wgpu::LoadOp::Load, wgpu::LoadOp::Load)
             };
+            let color_att = color_view.as_ref().map(|view| wgpu::RenderPassColorAttachment { view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store } });
+            let color_att_ref: &[Option<wgpu::RenderPassColorAttachment<'_>>] = if color_att.is_some() { &[color_att] } else { &[] };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("DrawRP"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &color_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store } })],
+                color_attachments: color_att_ref,
                 depth_stencil_attachment: depth_view.as_ref().map(|v| wgpu::RenderPassDepthStencilAttachment { view: v, depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }), stencil_ops: Some(wgpu::Operations { load: stencil_load, store: wgpu::StoreOp::Store }) }),
                 ..Default::default()
             });
@@ -382,13 +404,13 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
         };
         let wtex = texture.as_any().downcast_ref::<WgpuTexture>()?;
         if let GpuTextureKind::Rectangle { width, height } = texture.kind() {
-            let pk = texture.pixel_kind();
-            let total = image_2d_size_bytes(pk, width, height);
-            let buf = server.state.device.create_buffer(&wgpu::BufferDescriptor { label: Some("ReadPx"), size: total as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-            let mut enc = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ReadPxEnc") });
             let fmt = wtex.format();
-            let bps = fmt.block_copy_size(None).unwrap_or(4);
-            enc.copy_texture_to_buffer(wgpu::TexelCopyTextureInfo { texture: wtex.wgpu_texture(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((width as u32 * bps).max(256)), rows_per_image: Some(height as u32) } }, wgpu::Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 });
+            let bps = fmt.block_copy_size(None).unwrap_or(4) as usize;
+            let bytes_per_row = (width * bps).max(256);
+            let padded_total = bytes_per_row * (height - 1) + width * bps;
+            let buf = server.state.device.create_buffer(&wgpu::BufferDescriptor { label: Some("ReadPx"), size: padded_total as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let mut enc = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ReadPxEnc") });
+            enc.copy_texture_to_buffer(wgpu::TexelCopyTextureInfo { texture: wtex.wgpu_texture(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row as u32), rows_per_image: Some(height as u32) } }, wgpu::Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 });
             server.state.queue.submit(std::iter::once(enc.finish()));
             let slice = buf.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
@@ -396,8 +418,17 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
             server.state.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
             rx.recv().ok()?.ok()?;
             let mapped = slice.get_mapped_range();
-            let mut result = vec![0u8; total];
-            result.copy_from_slice(&mapped);
+            let unpadded_row = width * bps;
+            let mut result = vec![0u8; unpadded_row * height];
+            if bytes_per_row == unpadded_row {
+                result.copy_from_slice(&mapped);
+            } else {
+                for y in 0..height {
+                    let src_off = y * bytes_per_row;
+                    let dst_off = y * unpadded_row;
+                    result[dst_off..dst_off + unpadded_row].copy_from_slice(&mapped[src_off..src_off + unpadded_row]);
+                }
+            }
             drop(mapped);
             buf.unmap();
             Some(result)
