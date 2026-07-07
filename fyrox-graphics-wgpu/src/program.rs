@@ -190,6 +190,11 @@ impl WgpuShader {
         }
 
         let declarations = generate_wgsl_declarations(resources);
+        if name.contains("Widget") {
+            use std::io::Write;
+            let mut f = std::fs::File::create("C:\\Users\\I.Kondrashkin\\projects\\Fyrox\\shader_dump.txt").unwrap();
+            writeln!(f, "=== DECLS for {name} ===\n{declarations}=== SOURCE ===\n{source}").ok();
+        }
         let shared = include_str!("shaders/shared.wgsl");
 
         let mut wgsl = String::new();

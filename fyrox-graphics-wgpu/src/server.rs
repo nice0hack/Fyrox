@@ -41,7 +41,7 @@ use fyrox_graphics::server::{
 };
 use fyrox_graphics::stats::PipelineStatistics;
 use fyrox_graphics::{PolygonFace, PolygonFillMode};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, RwLock};
@@ -69,6 +69,12 @@ pub struct WgpuGraphicsServer {
     pub dummy_vertex_buffer: wgpu::Buffer,
     /// Non-filtering sampler for textures with non-filterable formats (e.g. R32Float).
     non_filtering_sampler: wgpu::Sampler,
+    /// Holds the acquired surface frame between do_draw and swap_buffers.
+    pub current_frame: RefCell<Option<wgpu::SurfaceTexture>>,
+    /// Whether the backbuffer needs clearing at the start of the next frame.
+    pub backbuffer_needs_clear: Cell<bool>,
+    /// Cached depth-stencil texture for the backbuffer, with its (width, height).
+    backbuffer_depth_stencil: RefCell<Option<(u32, u32, GpuTexture)>>,
 }
 
 impl WgpuGraphicsServer {
@@ -188,6 +194,9 @@ impl WgpuGraphicsServer {
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),
             dummy_vertex_buffer,
             non_filtering_sampler,
+            current_frame: RefCell::new(None),
+            backbuffer_needs_clear: Cell::new(true),
+            backbuffer_depth_stencil: RefCell::new(None),
         });
 
         *server.weak_self.borrow_mut() = Some(Rc::downgrade(&server));
@@ -217,7 +226,32 @@ impl GraphicsServer for WgpuGraphicsServer {
         Ok(GpuFrameBuffer(Rc::new(WgpuFrameBuffer::new(self, depth, colors)?)))
     }
     fn back_buffer(&self) -> GpuFrameBuffer {
-        GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self)))
+        let config = self.surface_config.read().unwrap();
+        let (w, h) = (config.width, config.height);
+        drop(config);
+
+        let mut cache = self.backbuffer_depth_stencil.borrow_mut();
+        let needs_recreate = match cache.as_ref() {
+            Some((cw, ch, _)) => *cw != w || *ch != h,
+            None => true,
+        };
+        if needs_recreate {
+            let depth_tex = match self.create_2d_render_target(
+                "BackbufferDepthStencil",
+                fyrox_graphics::gpu_texture::PixelKind::D24S8,
+                w as usize,
+                h as usize,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("Failed to create backbuffer depth-stencil: {e}");
+                    return GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self, None)));
+                }
+            };
+            *cache = Some((w, h, depth_tex));
+        }
+        let depth_attachment = cache.as_ref().map(|(_, _, tex)| Attachment::depth_stencil(tex.clone()));
+        GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self, depth_attachment)))
     }
     fn create_query(&self) -> Result<GpuQuery, FrameworkError> {
         Ok(GpuQuery(Rc::new(WgpuQuery::new(self)?)))
@@ -244,7 +278,13 @@ impl GraphicsServer for WgpuGraphicsServer {
     fn finish(&self) { self.state.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok(); }
     fn invalidate_resource_bindings_cache(&self) { *self.pipeline_statistics.borrow_mut() = Default::default(); }
     fn pipeline_statistics(&self) -> PipelineStatistics { *self.pipeline_statistics.borrow() }
-    fn swap_buffers(&self) -> Result<(), FrameworkError> { Ok(()) }
+    fn swap_buffers(&self) -> Result<(), FrameworkError> {
+        if let Some(frame) = self.current_frame.borrow_mut().take() {
+            frame.present();
+        }
+        self.backbuffer_needs_clear.set(true);
+        Ok(())
+    }
     fn set_frame_size(&self, new_size: (u32, u32)) {
         if new_size.0 > 0 && new_size.1 > 0 {
             let mut config = self.surface_config.write().unwrap();

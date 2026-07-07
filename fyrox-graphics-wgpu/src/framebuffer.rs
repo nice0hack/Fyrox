@@ -33,6 +33,7 @@ use fyrox_graphics::{
     gpu_texture::{image_2d_size_bytes, CubeMapFace, GpuTexture, GpuTextureKind},
     CompareFunc, CullFace, DrawParameters, ElementRange, BlendMode,
 };
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Weak;
@@ -83,6 +84,32 @@ fn blend_factor_to_wgpu(f: fyrox_graphics::BlendFactor) -> wgpu::BlendFactor {
     }
 }
 
+fn stencil_action_to_wgpu(a: fyrox_graphics::StencilAction) -> wgpu::StencilOperation {
+    match a {
+        fyrox_graphics::StencilAction::Keep => wgpu::StencilOperation::Keep,
+        fyrox_graphics::StencilAction::Zero => wgpu::StencilOperation::Zero,
+        fyrox_graphics::StencilAction::Replace => wgpu::StencilOperation::Replace,
+        fyrox_graphics::StencilAction::Incr => wgpu::StencilOperation::IncrementClamp,
+        fyrox_graphics::StencilAction::IncrWrap => wgpu::StencilOperation::IncrementWrap,
+        fyrox_graphics::StencilAction::Decr => wgpu::StencilOperation::DecrementClamp,
+        fyrox_graphics::StencilAction::DecrWrap => wgpu::StencilOperation::DecrementWrap,
+        fyrox_graphics::StencilAction::Invert => wgpu::StencilOperation::Invert,
+    }
+}
+
+fn stencil_face_state(compare: CompareFunc, op: &fyrox_graphics::StencilOp) -> wgpu::StencilFaceState {
+    wgpu::StencilFaceState {
+        compare: compare_func_to_wgpu(compare),
+        fail_op: stencil_action_to_wgpu(op.fail),
+        depth_fail_op: stencil_action_to_wgpu(op.zfail),
+        pass_op: stencil_action_to_wgpu(op.zpass),
+    }
+}
+
+fn format_has_stencil(fmt: wgpu::TextureFormat) -> bool {
+    matches!(fmt, wgpu::TextureFormat::Depth24PlusStencil8 | wgpu::TextureFormat::Depth32FloatStencil8)
+}
+
 fn cubemap_face_to_layer(face: CubeMapFace) -> u32 {
     match face {
         CubeMapFace::PositiveX => 0,
@@ -107,6 +134,7 @@ pub struct PipelineKey {
     blend: bool,
     depth_test: bool,
     depth_write: bool,
+    stencil: bool,
     cull: u8,
     extra_vert_count: u8,
 }
@@ -116,21 +144,29 @@ pub struct WgpuFrameBuffer {
     depth_attachment: Option<Attachment>,
     color_attachments: Vec<Attachment>,
     is_backbuffer: bool,
+    needs_clear: Cell<bool>,
+    pending_clear_color: RefCell<wgpu::Color>,
+    pending_clear_depth: RefCell<f32>,
 }
 
 impl WgpuFrameBuffer {
     pub fn new(server: &WgpuGraphicsServer, depth: Option<Attachment>, colors: Vec<Attachment>) -> Result<Self, FrameworkError> {
-        Ok(Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: colors, is_backbuffer: false })
+        Ok(Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: colors, is_backbuffer: false, needs_clear: Cell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0) })
     }
 
-    pub fn backbuffer(server: &WgpuGraphicsServer) -> Self {
-        Self { server: server.weak_ref(), depth_attachment: None, color_attachments: Default::default(), is_backbuffer: true }
+    pub fn backbuffer(server: &WgpuGraphicsServer, depth: Option<Attachment>) -> Self {
+        Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: Default::default(), is_backbuffer: true, needs_clear: Cell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0) }
     }
 
     fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind) -> wgpu::RenderPipeline {
+        let needs_stencil = params.stencil_test.is_some() || params.stencil_op.zpass != fyrox_graphics::StencilAction::Keep || params.stencil_op.fail != fyrox_graphics::StencilAction::Keep || params.stencil_op.zfail != fyrox_graphics::StencilAction::Keep;
+        let depth_fmt = df.unwrap_or(wgpu::TextureFormat::Depth32Float);
+        let stencil_supported = format_has_stencil(depth_fmt);
+        let effective_stencil = needs_stencil && stencil_supported;
         let key = PipelineKey {
             program_ptr: program as *const WgpuProgram as usize, color_format: cf, depth_format: df, sample_count: server.msaa_sample_count,
             blend: params.blend.is_some(), depth_test: params.depth_test.is_some(), depth_write: params.depth_write,
+            stencil: effective_stencil,
             cull: match params.cull_face { Some(CullFace::Back) => 2, Some(CullFace::Front) => 1, None => 0 },
             extra_vert_count: all_layouts.len() as u8,
         };
@@ -142,15 +178,38 @@ impl WgpuFrameBuffer {
             alpha: wgpu::BlendComponent { src_factor: blend_factor_to_wgpu(bp.func.alpha_sfactor), dst_factor: blend_factor_to_wgpu(bp.func.alpha_dfactor), operation: blend_mode_to_wgpu(bp.equation.alpha) },
         });
 
-        let depth_stencil = if params.depth_test.is_some() || params.depth_write {
+        let wgpu_stencil_state = if effective_stencil {
+            let default_face = stencil_face_state(CompareFunc::Always, &params.stencil_op);
+            let sf = params.stencil_test.as_ref().map(|st| stencil_face_state(st.func, &params.stencil_op))
+                .unwrap_or(default_face);
+            let read_mask = params.stencil_test.as_ref().map(|st| st.mask).unwrap_or(0xFFFF_FFFF);
+            wgpu::StencilState {
+                front: sf,
+                back: sf,
+                read_mask,
+                write_mask: params.stencil_op.write_mask,
+            }
+        } else {
+            wgpu::StencilState::default()
+        };
+
+        let depth_stencil = if params.depth_test.is_some() || params.depth_write || effective_stencil {
             Some(wgpu::DepthStencilState {
-                format: df.unwrap_or(wgpu::TextureFormat::Depth32Float),
+                format: depth_fmt,
                 depth_write_enabled: Some(params.depth_write),
                 depth_compare: Some(params.depth_test.map(compare_func_to_wgpu).unwrap_or(wgpu::CompareFunction::Always)),
+                stencil: wgpu_stencil_state,
+                bias: wgpu::DepthBiasState::default(),
+            })
+        } else {
+            df.map(|f| wgpu::DepthStencilState {
+                format: f,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             })
-        } else { df.map(|f| wgpu::DepthStencilState { format: f, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Always), stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }) };
+        };
 
         let cull = match params.cull_face { Some(CullFace::Back) => Some(wgpu::Face::Back), Some(CullFace::Front) => Some(wgpu::Face::Front), None => None };
 
@@ -185,10 +244,28 @@ impl WgpuFrameBuffer {
         if count == 0 { return Ok(DrawCallStatistics { triangles: 0 }); }
 
         let surface_tex = if self.is_backbuffer {
-            match server.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
-                other => return Err(FrameworkError::Custom(format!("Surface texture error: {other:?}"))),
+            // Only acquire a new frame if one isn't already stored from a prior draw call this frame.
+            if server.current_frame.borrow().is_none() {
+                match server.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                        *server.current_frame.borrow_mut() = Some(t);
+                    }
+                    wgpu::CurrentSurfaceTexture::Timeout => {
+                        log::warn!("Surface texture timeout, skipping frame");
+                        return Ok(DrawCallStatistics { triangles: 0 });
+                    }
+                    wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                        let config = server.surface_config.read().unwrap();
+                        server.surface.configure(&server.state.device, &config);
+                        log::warn!("Surface lost/outdated, reconfigured");
+                        return Ok(DrawCallStatistics { triangles: 0 });
+                    }
+                    other => return Err(FrameworkError::Custom(format!("Surface texture error: {other:?}"))),
+                }
             }
+            // Create a view from the stored frame (doesn't consume the SurfaceTexture).
+            let frame = server.current_frame.borrow();
+            Some(frame.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default()))
         } else { None };
 
         let cf = if self.is_backbuffer { server.surface_config.read().unwrap().format }
@@ -216,7 +293,7 @@ impl WgpuFrameBuffer {
         let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("DrawEnc") });
 
         let color_view = if self.is_backbuffer {
-            surface_tex.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default())
+            surface_tex.unwrap()
         } else {
             let first_color = self.color_attachments.first().unwrap();
             if let Some(face) = first_color.cube_map_face() {
@@ -249,15 +326,26 @@ impl WgpuFrameBuffer {
         });
 
         {
+            // Backbuffer clears once per frame (flag set by swap_buffers, consumed on first draw).
+            // Offscreen FBOs clear when their clear() was called.
+            let has_stencil_aspect = df.map(format_has_stencil).unwrap_or(false);
+            let (color_load, depth_load, stencil_load) = if self.is_backbuffer && server.backbuffer_needs_clear.replace(false) {
+                (wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }), wgpu::LoadOp::Clear(1.0), if has_stencil_aspect { wgpu::LoadOp::Clear(0) } else { wgpu::LoadOp::Load })
+            } else if !self.is_backbuffer && self.needs_clear.replace(false) {
+                (wgpu::LoadOp::Clear(*self.pending_clear_color.borrow()), wgpu::LoadOp::Clear(*self.pending_clear_depth.borrow()), if has_stencil_aspect { wgpu::LoadOp::Clear(0) } else { wgpu::LoadOp::Load })
+            } else {
+                (wgpu::LoadOp::Load, wgpu::LoadOp::Load, wgpu::LoadOp::Load)
+            };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("DrawRP"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &color_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
-                depth_stencil_attachment: depth_view.as_ref().map(|v| wgpu::RenderPassDepthStencilAttachment { view: v, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }), stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }) }),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &color_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: depth_view.as_ref().map(|v| wgpu::RenderPassDepthStencilAttachment { view: v, depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }), stencil_ops: Some(wgpu::Operations { load: stencil_load, store: wgpu::StoreOp::Store }) }),
                 ..Default::default()
             });
 
             rp.set_viewport(viewport.x() as f32, viewport.y() as f32, viewport.w() as f32, viewport.h() as f32, 0.0, 1.0);
             rp.set_pipeline(&pipeline);
+            if let Some(st) = &params.stencil_test { rp.set_stencil_reference(st.ref_value); }
             if let Some(bg) = &bind_group { rp.set_bind_group(0, bg, &[]); }
             let vbs = geo.vertex_buffers();
             for (i, vb) in vbs.iter().enumerate() { rp.set_vertex_buffer(i as u32, vb.slice(..)); }
@@ -267,9 +355,9 @@ impl WgpuFrameBuffer {
             rp.set_index_buffer(eb.slice(..), wgpu::IndexFormat::Uint32);
 
             let ipe = geo.element_kind().index_per_element();
-            let idx_count = (count * ipe) as u32;
-            let base_vert = (offset * ipe) as i32;
-            rp.draw_indexed(0..idx_count, base_vert, 0..instance_count);
+            let start_idx = (offset * ipe) as u32;
+            let end_idx = ((offset + count) * ipe) as u32;
+            rp.draw_indexed(start_idx..end_idx, 0, 0..instance_count);
         }
 
         server.state.queue.submit(std::iter::once(encoder.finish()));
@@ -315,7 +403,18 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
             Some(result)
         } else { None }
     }
-    fn clear(&self, _viewport: Rect<i32>, _color: Option<Color>, _depth: Option<f32>, _stencil: Option<i32>) {}
+    fn clear(&self, _viewport: Rect<i32>, color: Option<Color>, depth: Option<f32>, _stencil: Option<i32>) {
+        if let Some(c) = color {
+            *self.pending_clear_color.borrow_mut() = wgpu::Color {
+                r: c.r as f64 / 255.0, g: c.g as f64 / 255.0,
+                b: c.b as f64 / 255.0, a: c.a as f64 / 255.0,
+            };
+        }
+        if let Some(d) = depth {
+            *self.pending_clear_depth.borrow_mut() = d;
+        }
+        self.needs_clear.set(true);
+    }
     fn draw(&self, geometry: &GpuGeometryBuffer, viewport: Rect<i32>, program: &GpuProgram, params: &DrawParameters, resources: &[ResourceBindGroup], element_range: ElementRange) -> Result<DrawCallStatistics, FrameworkError> {
         self.do_draw(1, geometry, viewport, program, params, resources, element_range)
     }

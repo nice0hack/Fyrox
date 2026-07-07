@@ -39,8 +39,17 @@
                         output.texCoord = input.vertexTexCoord;
                         output.color = input.vertexColor;
                         output.localPosition = input.vertexPosition;
+
+                        // Умножаем mat3x3 на vec3f (получаем vec3f)
                         let worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3f(input.vertexPosition, 1.0);
-                        output.position = fyrox_widgetData.projectionMatrix * vec4f(worldSpaceVertex, 1.0);
+
+                        // Умножаем mat4x4 на vec4f (получаем vec4f)
+                        var clip_pos = fyrox_widgetData.projectionMatrix * vec4f(worldSpaceVertex, 1.0);
+
+                        // WebGPU Z-range: конвертируем OpenGL [-1, 1] в WebGPU [0, 1]
+                        clip_pos.z = (clip_pos.z + clip_pos.w) * 0.5;
+
+                        output.position = clip_pos;
                         return output;
                     }
                 "#,
@@ -129,7 +138,9 @@
                 r#"
                     @vertex fn vs_main(@location(0) vertexPosition: vec2f) -> @builtin(position) vec4f {
                         let worldSpaceVertex = fyrox_widgetData.worldMatrix * vec3f(vertexPosition, 1.0);
-                        return fyrox_widgetData.projectionMatrix * vec4f(worldSpaceVertex, 1.0);
+                        var clip_pos = fyrox_widgetData.projectionMatrix * vec4f(worldSpaceVertex, 1.0);
+                        clip_pos.z = (clip_pos.z + clip_pos.w) * 0.5;
+                        return clip_pos;
                     }
                 "#,
 
