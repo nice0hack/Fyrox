@@ -168,16 +168,21 @@ fn recreate_render_data_if_needed<T: Any>(
     frame_size: Vector2<f32>,
     final_frame_texture: FrameTextureKind,
 ) -> Result<(), FrameworkError> {
-    if data.gbuffer.width != frame_size.x as i32 || data.gbuffer.height != frame_size.y as i32 {
+    let new_w = frame_size.x as i32;
+    let new_h = frame_size.y as i32;
+    // Use >1px tolerance to prevent oscillation from fractional DPI scaling.
+    if (data.gbuffer.width - new_w).unsigned_abs() > 1
+        || (data.gbuffer.height - new_h).unsigned_abs() > 1
+    {
         Log::info(format!(
             "Associated scene rendering data was re-created for {} ({}), because render \
-                 frame size was changed. Old is {}x{}, new {}x{}!",
+                 frame size was changed. Old is {}x{}, new is {}x{}!",
             parent,
             std::any::type_name::<T>(),
             data.gbuffer.width,
             data.gbuffer.height,
-            frame_size.x,
-            frame_size.y
+            new_w,
+            new_h
         ));
 
         *data = RenderDataContainer::new(server, frame_size, final_frame_texture)?;
@@ -1246,6 +1251,12 @@ impl Renderer {
         dt: f32,
         resource_manager: &ResourceManager,
     ) -> Result<&SceneRenderData, FrameworkError> {
+        if scene_handle.is_none() {
+            return Err(FrameworkError::Custom(
+                "Attempted to render scene with invalid handle".into(),
+            ));
+        }
+
         let graph = &scene.graph;
 
         let _debug_scope = self.server.begin_scope(&format!("Scene {:p}", scene));

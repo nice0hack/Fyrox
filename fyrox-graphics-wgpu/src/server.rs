@@ -146,9 +146,15 @@ impl WgpuGraphicsServer {
         .map_err(|e| FrameworkError::Custom(format!("Failed to request device: {e}")))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let Some(surface_format) = surface_caps.formats.first().copied() else {
-            return Err(FrameworkError::Custom("Surface has no supported formats".into()));
-        };
+        // Prefer linear (non-sRGB) formats to avoid double gamma correction.
+        // The engine applies its own gamma correction in the HDR tone-mapping pass.
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| !f.is_srgb())
+            .or_else(|| surface_caps.formats.first().copied())
+            .ok_or_else(|| FrameworkError::Custom("Surface has no supported formats".into()))?;
 
         let present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
 

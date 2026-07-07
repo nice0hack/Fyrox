@@ -107,6 +107,13 @@ impl SceneRenderPass for HighlightRenderPass {
             return Ok(Default::default());
         }
 
+        // Skip highlight rendering when nothing is selected.
+        // Without this, the edge-detect shader reads stale FBO content on wgpu
+        // because the deferred clear never executes when no draw calls happen.
+        if self.nodes_to_highlight.is_empty() {
+            return Ok(Default::default());
+        }
+
         // Draw selected nodes in the temporary frame buffer first.
         {
             let render_pass_name = ImmutableString::new("Forward");
