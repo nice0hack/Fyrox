@@ -62,6 +62,9 @@ pub struct WgpuGraphicsServer {
     pub named_objects: bool,
     pub msaa_sample_count: u32,
     pub pipeline_cache: RefCell<HashMap<u64, wgpu::RenderPipeline>>,
+    /// Caches `wgpu::BindGroup` objects by resource pointer key to avoid
+    /// re-creating identical bind groups every draw call.
+    pub bind_group_cache: RefCell<crate::bind_group_cache::BindGroupCache>,
     weak_self: RefCell<Option<Weak<WgpuGraphicsServer>>>,
     pub memory_usage: RefCell<ServerMemoryUsage>,
     pipeline_statistics: RefCell<PipelineStatistics>,
@@ -193,6 +196,7 @@ impl WgpuGraphicsServer {
             named_objects,
             msaa_sample_count: msaa,
             pipeline_cache: RefCell::new(HashMap::new()),
+            bind_group_cache: Default::default(),
             weak_self: RefCell::new(None),
             memory_usage: RefCell::new(ServerMemoryUsage::default()),
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),

@@ -23,6 +23,7 @@ use crate::geometry_buffer::WgpuGeometryBuffer;
 use crate::program::WgpuProgram;
 use crate::sampler::WgpuSampler;
 use crate::server::WgpuGraphicsServer;
+use std::sync::Arc;
 use crate::texture::WgpuTexture;
 use fyrox_graphics::{
     core::{color::Color, math::Rect},
@@ -385,7 +386,7 @@ impl WgpuFrameBuffer {
             rp.set_viewport(viewport.x() as f32, viewport.y() as f32, viewport.w() as f32, viewport.h() as f32, 0.0, 1.0);
             rp.set_pipeline(&pipeline);
             if let Some(st) = &params.stencil_test { rp.set_stencil_reference(st.ref_value); }
-            if let Some(bg) = &bind_group { rp.set_bind_group(0, bg, &[]); }
+            if let Some(bg) = &bind_group { rp.set_bind_group(0, bg.as_ref(), &[]); }
             let vbs = geo.vertex_buffers();
             for (i, vb) in vbs.iter().enumerate() { rp.set_vertex_buffer(i as u32, vb.slice(..)); }
             let geo_buf_count = vbs.len() as u32;
@@ -515,35 +516,47 @@ fn is_filterable_format(fmt: wgpu::TextureFormat) -> bool {
         | wgpu::TextureFormat::R8Sint | wgpu::TextureFormat::R16Sint | wgpu::TextureFormat::R32Sint)
 }
 
-fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups: &[ResourceBindGroup]) -> Option<wgpu::BindGroup> {
+fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups: &[ResourceBindGroup]) -> Option<Arc<wgpu::BindGroup>> {
+    // Build the cache key from resource bindings (pointer-based, stable across frames).
+    let all_bindings: Vec<_> = groups.iter().flat_map(|g| g.bindings.iter()).collect();
+    if all_bindings.is_empty() { return None; }
+    let cache_key = crate::bind_group_cache::BindGroupCacheKey::new(&all_bindings);
+
+    // Fast path: return cached bind group if available.
+    if let Some(cached) = server.bind_group_cache.borrow().get(&cache_key) {
+        return Some(cached);
+    }
+
+    // Slow path: build bind group entries.
     let mut entries = Vec::new();
     let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
-    for group in groups {
-        for binding in group.bindings {
-            match binding {
-                ResourceBinding::Texture { texture, sampler, binding: loc } => {
-                    let wt = texture.as_any().downcast_ref::<WgpuTexture>()?;
-                    let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
-                    texture_formats.push((*loc, wt.format()));
-                    entries.push(wgpu::BindGroupEntry { binding: *loc as u32, resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()) });
-                    let sampler_res = if is_filterable_format(wt.format()) {
-                        wgpu::BindingResource::Sampler(ws.wgpu_sampler())
-                    } else {
-                        wgpu::BindingResource::Sampler(server.non_filtering_sampler())
-                    };
-                    entries.push(wgpu::BindGroupEntry { binding: (*loc + 100) as u32, resource: sampler_res });
-                }
-                ResourceBinding::Buffer { buffer, binding: loc, data_usage } => {
-                    let wb = buffer.as_any().downcast_ref::<WgpuBuffer>()?;
-                    match data_usage {
-                        BufferDataUsage::UseEverything => entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: 0, size: None }) }),
-                        BufferDataUsage::UseSegment { offset, size } => entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: *offset as u64, size: Some(std::num::NonZeroU64::new(*size as u64).unwrap()) }) }),
-                    }
+    for binding in &all_bindings {
+        match binding {
+            ResourceBinding::Texture { texture, sampler, binding: loc } => {
+                let wt = texture.as_any().downcast_ref::<WgpuTexture>()?;
+                let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
+                texture_formats.push((*loc, wt.format()));
+                entries.push(wgpu::BindGroupEntry { binding: *loc as u32, resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()) });
+                let sampler_res = if is_filterable_format(wt.format()) {
+                    wgpu::BindingResource::Sampler(ws.wgpu_sampler())
+                } else {
+                    wgpu::BindingResource::Sampler(server.non_filtering_sampler())
+                };
+                entries.push(wgpu::BindGroupEntry { binding: (*loc + 100) as u32, resource: sampler_res });
+            }
+            ResourceBinding::Buffer { buffer, binding: loc, data_usage } => {
+                let wb = buffer.as_any().downcast_ref::<WgpuBuffer>()?;
+                match data_usage {
+                    BufferDataUsage::UseEverything => entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: 0, size: None }) }),
+                    BufferDataUsage::UseSegment { offset, size } => entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: *offset as u64, size: Some(std::num::NonZeroU64::new(*size as u64).unwrap()) }) }),
                 }
             }
         }
     }
-    if entries.is_empty() { return None; }
+
     let (bgl, _) = program.get_or_create_layouts(&texture_formats);
-    Some(server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: &bgl, entries: &entries }))
+    let bind_group = server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: &bgl, entries: &entries });
+
+    // Cache and return the Arc-wrapped bind group.
+    Some(server.bind_group_cache.borrow_mut().insert(cache_key, bind_group))
 }

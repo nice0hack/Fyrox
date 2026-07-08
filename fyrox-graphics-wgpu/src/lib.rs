@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+pub mod bind_group_cache;
 pub mod buffer;
 pub mod color_space;
 pub mod framebuffer;
