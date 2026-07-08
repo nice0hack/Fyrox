@@ -3,6 +3,23 @@
 
 const PI: f32 = 3.14159;
 
+// Convert a single channel from sRGB to linear.
+// Authored sRGB values (e.g. uniform Color properties, per-vertex
+// colors) must be converted before being used in the linear working
+// space. sRGB-tagged textures auto-decode on sample; this helper is for
+// the non-texture-sampled paths.
+fn srgb_to_linear_channel(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+// Convert a vec3 from sRGB to linear (alpha unchanged).
+fn srgb_to_linear(c: vec3f) -> vec3f {
+    return vec3f(srgb_to_linear_channel(c.r), srgb_to_linear_channel(c.g), srgb_to_linear_channel(c.b));
+}
+
 fn inverse_mat4(m: mat4x4f) -> mat4x4f {
     let m00 = m[0][0]; let m01 = m[0][1]; let m02 = m[0][2]; let m03 = m[0][3];
     let m10 = m[1][0]; let m11 = m[1][1]; let m12 = m[1][2]; let m13 = m[1][3];

@@ -37,7 +37,9 @@
                     @vertex fn vs_main(input: VertexInput) -> VertexOutput {
                         var output: VertexOutput;
                         output.texCoord = input.vertexTexCoord;
-                        output.color = input.vertexColor;
+                        // Per-vertex colors are authored in sRGB bytes (fyrox-ui).
+                        // Convert to linear so the working space stays linear.
+                        output.color = vec4f(srgb_to_linear(input.vertexColor.rgb), input.vertexColor.a);
                         output.localPosition = input.vertexPosition;
 
                         // Умножаем mat3x3 на vec3f (получаем vec3f)

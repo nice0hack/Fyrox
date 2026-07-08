@@ -309,7 +309,12 @@ pub fn write_with_material<T, C, G>(
             Matrix4Array { value, max_len } => push_slice!(Matrix4Array, value, max_len),
             Bool { value } => push_value!(Bool, value),
             Color { r, g, b, a } => {
-                let value = &color::Color::from_rgba(*r, *g, *b, *a);
+                // Authored sRGB — convert to linear so the uniform buffer
+                // holds the working-space value the shader expects. The
+                // wgpu `Color::Std140::write` writes `as_frgba()` (byte
+                // normalization to 0..1 f32), so converting the bytes here
+                // yields correct linear floats.
+                let value = &color::Color::from_rgba(*r, *g, *b, *a).srgb_to_linear();
                 push_value!(Color, value)
             }
         };
@@ -342,7 +347,14 @@ pub fn write_shader_values<T: ByteStorage>(
             Matrix4 { value: default } => buf.push(default),
             Matrix4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
             Bool { value } => buf.push(value),
-            Color { r, g, b, a } => buf.push(&color::Color::from_rgba(*r, *g, *b, *a)),
+            Color { r, g, b, a } => {
+                // Authored sRGB — convert to linear so the uniform buffer
+                // holds the working-space value the shader expects. The
+                // wgpu `Color::Std140::write` writes `as_frgba()` (byte
+                // normalization to 0..1 f32), so converting the bytes here
+                // yields correct linear floats.
+                buf.push(&color::Color::from_rgba(*r, *g, *b, *a).srgb_to_linear())
+            }
         };
     }
 }
@@ -1335,5 +1347,38 @@ mod test {
             buf.is_empty(),
             "fresh uniform buffer must be empty"
         );
+    }
+
+    /// Documents the sRGB→linear conversion of authored `Color` properties.
+    /// A `Color(128, 128, 128)` is the sRGB-encoded representation of
+    /// 50%-perceived gray; its linear value is approximately 0.215. The
+    /// `as_frgba()` normalization in `Color::Std140::write` then yields a
+    /// linear 0.215, which is what shaders consume.
+    #[test]
+    fn test_srgb_to_linear_color_normalizes_correctly() {
+        use fyrox_core::color::Color;
+        let color = Color::from_rgba(128, 128, 128, 255);
+        let linear = color.srgb_to_linear();
+        let frgba = linear.as_frgba();
+        // Linear value for sRGB 128 is ~0.215. Allow rounding.
+        assert!(
+            (frgba.x - 0.215).abs() < 0.02,
+            "expected linear ~0.215, got {}",
+            frgba.x
+        );
+        assert_eq!(frgba.w, 1.0, "alpha must be preserved");
+    }
+
+    /// Pure-black sRGB (0,0,0) must stay zero in linear. Pure-white sRGB
+    /// (255,255,255) must stay 1.0 in linear.
+    #[test]
+    fn test_srgb_to_linear_color_endpoints() {
+        use fyrox_core::color::Color;
+        let black = Color::from_rgba(0, 0, 0, 255).srgb_to_linear();
+        assert_eq!(black.as_frgba().x, 0.0);
+
+        let white = Color::from_rgba(255, 255, 255, 255).srgb_to_linear();
+        let frgba = white.as_frgba();
+        assert!((frgba.x - 1.0).abs() < 0.01);
     }
 }
