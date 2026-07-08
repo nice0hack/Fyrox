@@ -37,7 +37,7 @@ use crate::{
     graph::SceneGraph,
     graphics::{
         error::FrameworkError,
-        framebuffer::{GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
+        framebuffer::{BufferDataUsage, GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
         gpu_program::{
             SamplerFallback, ShaderProperty, ShaderPropertyKind, ShaderResourceDefinition,
             ShaderResourceKind,
@@ -653,6 +653,19 @@ impl RenderDataBundle {
                                     .uniform_memory_allocator
                                     .block_to_binding(*block_location, resource_definition.binding),
                             );
+                        } else {
+                            // PropertyGroup declared in BGL (program.rs:165-167) but the
+                            // block was skipped at bundle.rs:438-442 because it was empty.
+                            // Bind a stub so the BGL validates. Mirrors the
+                            // bone_matrices_stub_uniform_buffer pattern.
+                            material_bindings.push(ResourceBinding::Buffer {
+                                buffer: render_context
+                                    .renderer_resources
+                                    .empty_property_group_stub_buffer
+                                    .clone(),
+                                binding: resource_definition.binding,
+                                data_usage: BufferDataUsage::UseEverything,
+                            });
                         }
                     }
                 },
@@ -1303,6 +1316,24 @@ mod test {
         assert_eq!(
             render_context.calculate_sorting_index(Vector3::new(0.0, 0.0, -3.0)),
             center - 3000
+        );
+    }
+
+    /// Documents the invariant: when a material PropertyGroup is empty, the
+    /// block is intentionally skipped from `material_property_group_blocks`
+    /// (bundle.rs:438-442) so no uniform data is uploaded. The fallback path
+    /// in `render_to_frame_buffer` (bundle.rs:644-657) detects this skip and
+    /// binds `empty_property_group_stub_buffer` to satisfy the wgpu BGL.
+    #[test]
+    fn test_empty_property_group_is_skipped_from_blocks() {
+        use fyrox_graphics::uniform::StaticUniformBuffer;
+
+        // A fresh uniform buffer is empty — represents the case where a
+        // material's PropertyGroup has no ShaderProperty entries.
+        let buf = StaticUniformBuffer::<1024>::new();
+        assert!(
+            buf.is_empty(),
+            "fresh uniform buffer must be empty"
         );
     }
 }

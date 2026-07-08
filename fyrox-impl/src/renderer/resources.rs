@@ -215,6 +215,15 @@ pub struct RendererResources {
     pub volume_dummy: GpuTexture,
     /// A stub uniform buffer for situation when there's no actual bone matrices.
     pub bone_matrices_stub_uniform_buffer: GpuBuffer,
+    /// A stub uniform buffer for material property groups that are empty.
+    ///
+    /// `RenderDataBundle` skips pushing into `material_property_group_blocks` when the
+    /// property group is empty (`bundle.rs:438-442`), but the wgpu BindGroupLayout
+    /// unconditionally declares a `binding+200` entry for every PropertyGroup the
+    /// shader defines (`program.rs:165-167`). This stub buffer is bound in the
+    /// fallback path at `bundle.rs:644-657` so the BGL validates even when the
+    /// shader declares an empty group.
+    pub empty_property_group_stub_buffer: GpuBuffer,
     /// A sampler with the linear filtration that clamps incoming UVs to `[0;1]` range.
     pub linear_clamp_sampler: GpuSampler,
     /// A sampler with the linear filtration and mipmapping that clamps incoming UVs to `[0;1]` range.
@@ -312,6 +321,21 @@ impl RendererResources {
                 const SIZE: usize = ShaderDefinition::MAX_BONE_MATRICES * size_of::<Matrix4<f32>>();
                 let zeros = [0.0; SIZE];
                 buffer.write_data(array_as_u8_slice(&zeros))?;
+                buffer
+            },
+            empty_property_group_stub_buffer: {
+                // 16 bytes — enough to satisfy any 4xf32 PropertyGroup that the
+                // shader might declare with no fields. The wgpu BGL for empty
+                // groups has `min_binding_size: None` (program.rs:166), so any
+                // non-zero size validates.
+                let buffer = server.create_buffer(GpuBufferDescriptor {
+                    name: "EmptyPropertyGroupStubBuffer",
+                    size: 16,
+                    kind: BufferKind::Uniform,
+                    usage: BufferUsage::StaticDraw,
+                })?;
+                let zeros = [0u8; 16];
+                buffer.write_data(&zeros)?;
                 buffer
             },
             linear_clamp_sampler: server.create_sampler(GpuSamplerDescriptor {
