@@ -523,7 +523,7 @@ fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups:
     let cache_key = crate::bind_group_cache::BindGroupCacheKey::new(&all_bindings);
 
     // Fast path: return cached bind group if available.
-    if let Some(cached) = server.bind_group_cache.borrow().get(&cache_key) {
+    if let Some(cached) = server.bind_group_cache.borrow_mut().get(&cache_key) {
         return Some(cached);
     }
 

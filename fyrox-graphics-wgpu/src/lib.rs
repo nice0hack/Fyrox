@@ -23,6 +23,7 @@ pub mod buffer;
 pub mod color_space;
 pub mod framebuffer;
 pub mod geometry_buffer;
+pub mod metrics;
 pub mod pipeline;
 pub mod program;
 pub mod query;

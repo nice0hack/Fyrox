@@ -29,6 +29,7 @@
 //! (no eviction). SinceFyrox creates a finite, stable set of texture/sampler/buffer
 //! objects per scene load, unbounded growth is not a practical concern.
 
+use crate::metrics::BindGroupMetrics;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -126,12 +127,21 @@ impl Hash for BindGroupCacheKey {
 #[derive(Default)]
 pub struct BindGroupCache {
     entries: HashMap<BindGroupCacheKey, Arc<BindGroup>>,
+    metrics: BindGroupMetrics,
 }
 
 impl BindGroupCache {
     /// Looks up a cached bind group, if one exists for the given key.
-    pub fn get(&self, key: &BindGroupCacheKey) -> Option<Arc<BindGroup>> {
-        self.entries.get(key).cloned()
+    ///
+    /// Records a hit if found, or a miss if not found.
+    pub fn get(&mut self, key: &BindGroupCacheKey) -> Option<Arc<BindGroup>> {
+        let result = self.entries.get(key).cloned();
+        if result.is_some() {
+            self.metrics.record_hit();
+        } else {
+            self.metrics.record_miss();
+        }
+        result
     }
 
     /// Inserts a bind group into the cache, returning the `Arc` that the caller should use.
@@ -150,6 +160,11 @@ impl BindGroupCache {
     /// Returns true if the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Snapshots and resets the hit/miss counters.
+    pub fn metrics_snapshot_and_reset(&self) -> (u64, u64) {
+        self.metrics.snapshot_and_reset()
     }
 }
 
