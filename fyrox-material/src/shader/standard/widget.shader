@@ -96,7 +96,8 @@
                             fragColor = mix(fyrox_widgetData.gradientColors[current], fyrox_widgetData.gradientColors[next], mix_factor);
                         }
 
-                        let diffuseColor = S_SRGBToLinear(textureSample(fyrox_widgetTexture_tex, fyrox_widgetTexture_samp, texCoord));
+                        // sRGB-tagged widget textures auto-decode on sample; no manual conversion.
+                        let diffuseColor = textureSample(fyrox_widgetTexture_tex, fyrox_widgetTexture_samp, texCoord);
 
                         if (fyrox_widgetData.isFont != 0u) {
                             fragColor.a *= diffuseColor.r;

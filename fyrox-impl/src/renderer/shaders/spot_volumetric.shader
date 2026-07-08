@@ -129,7 +129,7 @@
                             }
                         }
 
-                        return vec4f(properties.lightColor.xyz * pow(clamp(properties.intensity * scatter, vec3f(0.0), vec3f(1.0)), vec3f(2.2)), 1.0);
+                        return vec4f(properties.lightColor.xyz * clamp(properties.intensity * scatter, vec3f(0.0), vec3f(1.0)), 1.0);
                     }
                 "#,
         )

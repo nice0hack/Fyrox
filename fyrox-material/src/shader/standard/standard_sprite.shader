@@ -94,7 +94,7 @@
            fragment_shader:
                r#"
                 @fragment fn fs_main(@location(0) texCoord: vec2f, @location(1) color: vec4f) -> @location(0) vec4f {
-                    return color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
+                    return color * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
                 }
                "#,
         )

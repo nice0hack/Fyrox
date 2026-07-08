@@ -116,7 +116,7 @@
                         lighting += lightColor * (distanceAttenuation * directionalAttenuation);
                     }
 
-                    return vec4f(lighting, 1.0) * color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
+                    return vec4f(lighting, 1.0) * color * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
                 }
                "#,
         )

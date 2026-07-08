@@ -119,9 +119,10 @@
                         let ldrColor = vec4f(S_ConvertYxyToRgb(Yxy), hdrColor.a);
 
                         if (properties.useColorGrading != 0u) {
-                            return vec4f(ColorGrading(S_LinearToSRGB(ldrColor).rgb), ldrColor.a);
+                            // ColorGrading operates in linear space; output is linear (swapchain is linear).
+                            return vec4f(ColorGrading(ldrColor.rgb), ldrColor.a);
                         } else {
-                            return S_LinearToSRGB(ldrColor);
+                            return ldrColor;
                         }
                     }
                 "#,

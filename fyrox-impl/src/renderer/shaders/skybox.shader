@@ -61,7 +61,8 @@
             fragment_shader:
                 r#"
                     @fragment fn fs_main(@location(0) tex_coord: vec3f) -> @location(0) vec4f {
-                        return S_SRGBToLinear(textureSample(cubemapTexture_tex, cubemapTexture_samp, tex_coord));
+                        // sRGB-tagged cubemap textures auto-decode on sample; no manual conversion.
+                        return textureSample(cubemapTexture_tex, cubemapTexture_samp, tex_coord);
                     }
                 "#,
         )

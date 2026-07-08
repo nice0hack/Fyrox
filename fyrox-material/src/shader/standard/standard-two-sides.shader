@@ -140,7 +140,8 @@
                     output.position = fyrox_instanceData.worldViewProjection * localPosition; output.texCoord = input.vertexTexCoord; return output;
                 }
                 "#,
-            fragment_shader: r#"@fragment fn fs_main(@location(1) texCoord: vec2f) -> @location(0) vec4f { return properties.diffuseColor * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord)); }"#,
+            fragment_shader: r#"@fragment fn fs_main(@location(1) texCoord: vec2f) -> @location(0) vec4f { // sRGB-tagged diffuse textures auto-decode on sample; no manual conversion.
+return properties.diffuseColor * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord); }"#,
         ),
         (
             name: "DirectionalShadow",

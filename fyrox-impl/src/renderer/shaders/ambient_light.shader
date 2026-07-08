@@ -121,7 +121,8 @@
                         let depth = textureSample(depthTexture_tex, depthTexture_samp, tex_coord);
                         let fragment_position = S_UnProject(vec3f(tex_coord, depth), properties.invViewProj);
 
-                        let albedo = S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, tex_coord));
+                        // GBuffer diffuse texture is linear (Rgba8Unorm); no manual decode.
+                        let albedo = textureSample(diffuseTexture_tex, diffuseTexture_samp, tex_coord);
 
                         let fragment_normal = normalize(textureSample(normalTexture_tex, normalTexture_samp, tex_coord).xyz * 2.0 - 1.0);
 
@@ -140,7 +141,8 @@
 
                         var reflection: vec3f;
                         if (properties.skyboxLighting != 0u) {
-                            reflection = S_SRGBToLinear(textureSampleLevel(prefilteredSpecularMap_tex, prefilteredSpecularMap_samp, reflection_vector, mip)).rgb;
+                            // prefiltered specular cubemap is sRGB-tagged; GPU auto-decodes on sample.
+                            reflection = textureSampleLevel(prefilteredSpecularMap_tex, prefilteredSpecularMap_samp, reflection_vector, mip).rgb;
                         } else {
                             reflection = properties.ambientColor.rgb;
                         }
@@ -155,7 +157,8 @@
                         let ambient_occlusion = textureSample(aoSampler_tex, aoSampler_samp, tex_coord).r * material_ao;
                         let baked_lighting = textureSample(bakedLightingTexture_tex, bakedLightingTexture_samp, tex_coord);
 
-                        let irradiance = S_SRGBToLinear(textureSample(irradianceMap_tex, irradianceMap_samp, fragment_normal)).rgb;
+                        // irradiance cubemap is sRGB-tagged; GPU auto-decodes on sample.
+                        let irradiance = textureSample(irradianceMap_tex, irradianceMap_samp, fragment_normal).rgb;
 
                         var ambient_lighting: vec3f;
                         if (properties.skyboxLighting != 0u) {

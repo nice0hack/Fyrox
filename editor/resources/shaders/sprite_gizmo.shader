@@ -100,7 +100,7 @@
                 @fragment
                 fn fs_main(@location(0) texCoord: vec2f, @location(1) color: vec4f, @builtin(position) fragCoord: vec4f) -> FragOutput {
                     var output: FragOutput;
-                    output.color = color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
+                    output.color = color * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
 
                     // Pull depth towards near clipping plane so the gizmo will be drawn on top
                     // of everything, but its parts will be correctly handled by depth test.

@@ -139,16 +139,35 @@ fn write_uniform_blocks(
                     Brush::RadialGradient { center, .. } => (center, Vector2::default()),
                 };
 
-                let solid_color = match cmd.brush {
-                    Brush::Solid(color) => color,
-                    _ => Color::WHITE,
-                };
+                // sRGB-to-linear conversion for authored sRGB colors (brush colors, gradient stops).
+                // Under the linear working-space convention, these must be converted on the CPU
+                // before upload so the shader operates in linear space.
+                fn srgb_to_linear(c: f32) -> f32 {
+                    if c <= 0.04045 {
+                        c / 12.92
+                    } else {
+                        ((c + 0.055) / 1.055).powf(2.4)
+                    }
+                }
+                fn srgb_to_linear_color(color: Vector4<f32>) -> Vector4<f32> {
+                    Vector4::new(
+                        srgb_to_linear(color.x),
+                        srgb_to_linear(color.y),
+                        srgb_to_linear(color.z),
+                        color.w, // alpha is linear
+                    )
+                }
+
+                let solid_color: Vector4<f32> = srgb_to_linear_color(match cmd.brush {
+                    Brush::Solid(color) => color.as_frgba(),
+                    _ => Color::WHITE.as_frgba(),
+                });
                 let gradient_colors = match cmd.brush {
                     Brush::Solid(_) => &raw_colors,
                     Brush::LinearGradient { ref stops, .. }
                     | Brush::RadialGradient { ref stops, .. } => {
                         for (i, point) in stops.iter().enumerate() {
-                            raw_colors[i] = point.color.as_frgba();
+                            raw_colors[i] = srgb_to_linear_color(point.color.as_frgba());
                         }
                         &raw_colors
                     }

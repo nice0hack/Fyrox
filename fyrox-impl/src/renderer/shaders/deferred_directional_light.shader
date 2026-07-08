@@ -120,7 +120,8 @@
                         let diffuse_color = textureSample(colorTexture_tex, colorTexture_samp, tex_coord);
 
                         var ctx: TPBRContext;
-                        ctx.albedo = S_SRGBToLinear(diffuse_color).rgb;
+                        // GBuffer color texture is linear (Rgba8Unorm); no manual decode.
+                        ctx.albedo = diffuse_color.rgb;
                         ctx.fragmentToLight = properties.lightDirection;
                         ctx.fragmentNormal = normalize(textureSample(normalTexture_tex, normalTexture_samp, tex_coord).xyz * 2.0 - 1.0);
                         ctx.lightColor = properties.lightColor.rgb;

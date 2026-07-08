@@ -62,7 +62,8 @@
             fragment_shader:
                 r#"
                     @fragment fn fs_main(@location(0) texCoord: vec2f) -> @location(0) vec4f {
-                        return S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
+                        // sRGB-tagged source textures auto-decode on sample; no manual conversion.
+                        return textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
                     }
                 "#,
         )

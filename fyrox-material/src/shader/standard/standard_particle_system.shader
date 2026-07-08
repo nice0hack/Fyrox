@@ -111,7 +111,8 @@
 
                 @vertex fn vs_main(input: VertexInput) -> VertexOutput {
                     var output: VertexOutput;
-                    output.color = S_SRGBToLinear(input.vertexColor);
+                    // Vertex colors are authored in linear; no conversion needed.
+                    output.color = input.vertexColor;
                     output.texCoord = input.vertexTexCoord;
                     let vertexOffset = S_RotateVec2(input.vertexTexCoord * 2.0 - 1.0, input.particleRotation);
                     let worldPosition = fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0);
@@ -164,7 +165,7 @@
                         lighting = vec3f(1.0);
                     }
 
-                    var fragColor = vec4f(lighting, 1.0) * color * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord)).r;
+                    var fragColor = vec4f(lighting, 1.0) * color * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord).r;
                     fragColor.a *= depthOpacity;
                     return fragColor;
                 }

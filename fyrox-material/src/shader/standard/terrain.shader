@@ -122,7 +122,7 @@
                 r#"
                 @fragment fn fs_main(@location(1) texCoord: vec2f) -> @location(0) vec4f {
                     if (textureSample(holeMaskTexture_tex, holeMaskTexture_samp, texCoord).r < 0.5) { discard; }
-                    return properties.diffuseColor * S_SRGBToLinear(textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord));
+                    return properties.diffuseColor * textureSample(diffuseTexture_tex, diffuseTexture_samp, texCoord);
                 }
                 "#,
         ),
