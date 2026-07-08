@@ -142,7 +142,7 @@ use winit::{
     window::Icon,
     window::WindowAttributes,
 };
-use fyrox_graphics_wgpu::server::WgpuGraphicsServer;
+use fyrox_graphics_wgpu::server::{AdapterPreference, WgpuGraphicsServer};
 
 /// Serialization context holds runtime type information that allows to create unknown types using
 /// their UUIDs and a respective constructors.
@@ -1033,6 +1033,7 @@ impl GraphicsServerConstructor {
                     window_target,
                     window_builder,
                     named_objects,
+                    AdapterPreference::default(),
                 )
             },
         ))
@@ -1049,6 +1050,7 @@ impl Default for GraphicsServerConstructor {
                     window_target,
                     window_builder,
                     named_objects,
+                    AdapterPreference::default(),
                 )
             },
         ))

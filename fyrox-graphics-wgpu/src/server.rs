@@ -27,6 +27,7 @@ use crate::read_buffer::WgpuAsyncReadBuffer;
 use crate::sampler::WgpuSampler;
 use crate::texture::WgpuTexture;
 use fyrox_core::futures::executor::block_on;
+use fyrox_core::log::{Log, MessageKind};
 use fyrox_graphics::buffer::{GpuBuffer, GpuBufferDescriptor};
 use fyrox_graphics::error::FrameworkError;
 use fyrox_graphics::framebuffer::{Attachment, GpuFrameBuffer};
@@ -80,6 +81,99 @@ pub struct WgpuGraphicsServer {
     backbuffer_depth_stencil: RefCell<Option<(u32, u32, GpuTexture)>>,
 }
 
+/// Controls which GPU is preferred when selecting a WGPU adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdapterPreference {
+    /// Automatically select a suitable adapter. Prefers high-performance GPUs.
+    #[default]
+    Auto,
+    /// Prefer the most powerful available GPU (discrete GPU if present).
+    PreferHighPerformance,
+    /// Prefer the least powerful GPU (integrated GPU) to conserve power.
+    PreferLowPower,
+}
+
+fn power_preference(pref: AdapterPreference) -> wgpu::PowerPreference {
+    match pref {
+        AdapterPreference::Auto | AdapterPreference::PreferHighPerformance => {
+            wgpu::PowerPreference::HighPerformance
+        }
+        AdapterPreference::PreferLowPower => wgpu::PowerPreference::LowPower,
+    }
+}
+
+/// Attempts to find a suitable WGPU adapter, with fallback tiers.
+async fn select_adapter<'a>(
+    instance: &'a wgpu::Instance,
+    surface: &'a wgpu::Surface<'a>,
+    preference: AdapterPreference,
+) -> Option<wgpu::Adapter> {
+    // Try preferred adapter first.
+    if let Ok(adapter) = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: power_preference(preference),
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+        })
+        .await
+    {
+        return Some(adapter);
+    }
+
+    // Fall back to LowPower if HighPerformance was requested.
+    if preference == AdapterPreference::PreferHighPerformance {
+        if let Ok(adapter) = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(surface),
+                force_fallback_adapter: false,
+            })
+            .await
+        {
+            return Some(adapter);
+        }
+    }
+
+    // Last resort: force fallback adapter.
+    instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: power_preference(preference),
+            compatible_surface: Some(surface),
+            force_fallback_adapter: true,
+        })
+        .await
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_maps_to_high_performance() {
+        assert_eq!(
+            power_preference(AdapterPreference::Auto),
+            wgpu::PowerPreference::HighPerformance
+        );
+    }
+
+    #[test]
+    fn prefer_high_performance_maps_to_high_performance() {
+        assert_eq!(
+            power_preference(AdapterPreference::PreferHighPerformance),
+            wgpu::PowerPreference::HighPerformance
+        );
+    }
+
+    #[test]
+    fn prefer_low_power_maps_to_low_power() {
+        assert_eq!(
+            power_preference(AdapterPreference::PreferLowPower),
+            wgpu::PowerPreference::LowPower
+        );
+    }
+}
+
 impl WgpuGraphicsServer {
     pub fn new(
         vsync: bool,
@@ -87,6 +181,7 @@ impl WgpuGraphicsServer {
         window_target: &ActiveEventLoop,
         window_attributes: WindowAttributes,
         named_objects: bool,
+        adapter_preference: AdapterPreference,
     ) -> Result<(Window, SharedGraphicsServer), FrameworkError> {
         let window = window_target
             .create_window(window_attributes)
@@ -126,12 +221,17 @@ impl WgpuGraphicsServer {
                 .map_err(|e| FrameworkError::Custom(format!("Failed to create surface: {e}")))?
         };
 
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| FrameworkError::Custom(format!("No suitable WGPU adapter found: {e}")))?;
+        let adapter = block_on(select_adapter(&instance, &surface, adapter_preference))
+            .ok_or_else(|| FrameworkError::Custom("No suitable WGPU adapter found".to_string()))?;
+
+        let adapter_info = adapter.get_info();
+        Log::writeln(
+            MessageKind::Information,
+            format!(
+                "WGPU adapter: {} (backend: {:?})",
+                adapter_info.name, adapter_info.backend
+            ),
+        );
 
         let (device, queue) = block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
