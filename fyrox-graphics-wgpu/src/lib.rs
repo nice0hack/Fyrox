@@ -27,6 +27,7 @@ pub mod pipeline;
 pub mod program;
 pub mod query;
 pub mod read_buffer;
+pub mod render_pass;
 pub mod sampler;
 pub mod server;
 pub mod shader_lint;
