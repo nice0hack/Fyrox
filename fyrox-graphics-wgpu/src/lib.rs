@@ -31,3 +31,4 @@ pub mod sampler;
 pub mod server;
 pub mod shader_lint;
 pub mod texture;
+pub mod uniform_pool;
