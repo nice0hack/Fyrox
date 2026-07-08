@@ -101,6 +101,7 @@ fn generate_wgsl_declarations(resources: &[ShaderResourceDefinition]) -> String 
 
 /// Compiles WGSL source into a wgpu shader module.
 fn compile_wgsl(device: &wgpu::Device, name: &str, wgsl: &str) -> Result<wgpu::ShaderModule, FrameworkError> {
+    crate::shader_lint::check_srgb_conversions(wgsl, name);
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(name),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(wgsl)),

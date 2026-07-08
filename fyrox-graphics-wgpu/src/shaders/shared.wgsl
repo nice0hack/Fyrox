@@ -391,20 +391,6 @@ fn S_FetchBlendShapeOffsets(storage_tex: texture_3d<f32>, storage_samp: sampler,
     return TBlendShapeOffsets(position, normal, tangent);
 }
 
-fn S_LinearToSRGB(color: vec4f) -> vec4f {
-    let a = 12.92 * color.rgb;
-    let b = 1.055 * pow(color.rgb, vec3f(1.0 / 2.4)) - 0.055;
-    let c = step(vec3f(0.0031308), color.rgb);
-    return vec4f(mix(a, b, c), color.a);
-}
-
-fn S_SRGBToLinear(color: vec4f) -> vec4f {
-    let a = color.rgb / 12.92;
-    let b = pow((color.rgb + 0.055) / 1.055, vec3f(2.4));
-    let c = step(vec3f(0.04045), color.rgb);
-    return vec4f(mix(a, b, c), color.a);
-}
-
 fn S_Luminance(x: vec3f) -> f32 {
     return dot(x, vec3f(0.2125, 0.7154, 0.0721));
 }

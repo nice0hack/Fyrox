@@ -27,4 +27,5 @@ pub mod query;
 pub mod read_buffer;
 pub mod sampler;
 pub mod server;
+pub mod shader_lint;
 pub mod texture;
