@@ -1445,8 +1445,8 @@ fn mip_byte_offset(kind: TextureKind, pixel_kind: TexturePixelKind, mut mip: usi
 fn convert_pixel_type_enum(pixel_kind: TexturePixelKind) -> fr::PixelType {
     match pixel_kind {
         TexturePixelKind::R8 | TexturePixelKind::Luminance8 => fr::PixelType::U8,
-        TexturePixelKind::RGB8 | TexturePixelKind::BGR8 => fr::PixelType::U8x3,
-        TexturePixelKind::RGBA8 | TexturePixelKind::BGRA8 => fr::PixelType::U8x4,
+        TexturePixelKind::RGB8 | TexturePixelKind::SRGB8 | TexturePixelKind::BGR8 => fr::PixelType::U8x3,
+        TexturePixelKind::RGBA8 | TexturePixelKind::SRGBA8 | TexturePixelKind::BGRA8 => fr::PixelType::U8x4,
         TexturePixelKind::RG8 | TexturePixelKind::LuminanceAlpha8 => fr::PixelType::U8x2,
         TexturePixelKind::R16 | TexturePixelKind::Luminance16 => fr::PixelType::U16,
         TexturePixelKind::RG16 | TexturePixelKind::LuminanceAlpha16 => fr::PixelType::U16x2,
@@ -1609,11 +1609,14 @@ impl Texture {
                 }
             }
 
+            // 8-bit RGB/RGBA images from common formats (PNG, JPEG, etc.) are authored
+            // in sRGB color space. Tag them as sRGB so the GPU auto-decodes on sample.
+            // 16-bit and 32-bit float images are linear data (HDR, normal maps, etc.).
             let src_pixel_kind = match dyn_img {
                 DynamicImage::ImageLuma8(_) => TexturePixelKind::Luminance8,
                 DynamicImage::ImageLumaA8(_) => TexturePixelKind::LuminanceAlpha8,
-                DynamicImage::ImageRgb8(_) => TexturePixelKind::RGB8,
-                DynamicImage::ImageRgba8(_) => TexturePixelKind::RGBA8,
+                DynamicImage::ImageRgb8(_) => TexturePixelKind::SRGB8,
+                DynamicImage::ImageRgba8(_) => TexturePixelKind::SRGBA8,
                 DynamicImage::ImageLuma16(_) => TexturePixelKind::Luminance16,
                 DynamicImage::ImageLumaA16(_) => TexturePixelKind::LuminanceAlpha16,
                 DynamicImage::ImageRgb16(_) => TexturePixelKind::RGB16,
