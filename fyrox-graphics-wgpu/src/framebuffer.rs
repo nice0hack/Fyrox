@@ -529,6 +529,7 @@ fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups:
 
     // Slow path: build bind group entries.
     let mut entries = Vec::new();
+    let mut buffer_actual_sizes: Vec<usize> = Vec::new(); // parallel to entries, for dedup
     let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
     for binding in &all_bindings {
         match binding {
@@ -537,25 +538,63 @@ fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups:
                 let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
                 texture_formats.push((*loc, wt.format()));
                 entries.push(wgpu::BindGroupEntry { binding: *loc as u32, resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()) });
+                buffer_actual_sizes.push(0);
                 let sampler_res = if is_filterable_format(wt.format()) {
                     wgpu::BindingResource::Sampler(ws.wgpu_sampler())
                 } else {
                     wgpu::BindingResource::Sampler(server.non_filtering_sampler())
                 };
                 entries.push(wgpu::BindGroupEntry { binding: (*loc + 100) as u32, resource: sampler_res });
+                buffer_actual_sizes.push(0);
             }
             ResourceBinding::Buffer { buffer, binding: loc, data_usage } => {
                 let wb = buffer.as_any().downcast_ref::<WgpuBuffer>()?;
+                let actual_size = buffer.size();
                 match data_usage {
-                    BufferDataUsage::UseEverything => entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: 0, size: None }) }),
-                    BufferDataUsage::UseSegment { offset, size } => entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: *offset as u64, size: Some(std::num::NonZeroU64::new(*size as u64).unwrap()) }) }),
+                    BufferDataUsage::UseEverything => {
+                        entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: 0, size: None }) });
+                        buffer_actual_sizes.push(actual_size);
+                    }
+                    BufferDataUsage::UseSegment { offset, size } => {
+                        entries.push(wgpu::BindGroupEntry { binding: (*loc + 200) as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: wb.wgpu_buffer(), offset: *offset as u64, size: Some(std::num::NonZeroU64::new(*size as u64).unwrap()) }) });
+                        buffer_actual_sizes.push(*size);
+                    }
                 }
             }
         }
     }
 
     let (bgl, _) = program.get_or_create_layouts(&texture_formats);
-    let bind_group = server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: &bgl, entries: &entries });
+
+    // Deduplicate buffer entries by raw binding number. When material and instance
+    // data collide at the same raw binding (e.g., material's empty PropertyGroup stub
+    // vs instance's bone_matrices stub), keep the larger buffer to satisfy shader
+    // expectations. Use actual GPU buffer size (not BufferBinding::size which is None
+    // for UseEverything entries).
+    let mut chosen_best: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut best_size_for_raw: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if e.binding >= 200 {
+            let raw = (e.binding - 200) as usize;
+            let size = buffer_actual_sizes[i];
+            let existing_best = best_size_for_raw.get(&raw).copied().unwrap_or(0);
+            if size > existing_best || !best_size_for_raw.contains_key(&raw) {
+                best_size_for_raw.insert(raw, size);
+                chosen_best.insert(raw, i);
+            }
+        }
+    }
+
+    let deduped_entries: Vec<_> = entries.iter().enumerate().filter(|(i, e)| {
+        if e.binding < 200 {
+            true
+        } else {
+            let raw = (e.binding - 200) as usize;
+            chosen_best.get(&raw) == Some(i)
+        }
+    }).map(|(_, e)| e.clone()).collect();
+
+    let bind_group = server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: &bgl, entries: &deduped_entries });
 
     // Cache and return the Arc-wrapped bind group.
     Some(server.bind_group_cache.borrow_mut().insert(cache_key, bind_group))
