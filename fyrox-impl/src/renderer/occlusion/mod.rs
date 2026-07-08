@@ -399,6 +399,7 @@ impl OcclusionTester {
             viewport,
             &material,
             uniform_buffer_cache,
+            renderer_resources,
             Default::default(),
             None,
         )?;

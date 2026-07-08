@@ -587,6 +587,7 @@ fn blit_pixels(
         viewport,
         &material,
         uniform_buffer_cache,
+        renderer_resources,
         Default::default(),
         None,
     )

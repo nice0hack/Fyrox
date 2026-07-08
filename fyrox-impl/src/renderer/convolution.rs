@@ -124,6 +124,7 @@ impl EnvironmentMapSpecularConvolution {
                         viewport,
                         &material,
                         uniform_buffer_cache,
+                        renderer_resources,
                         ElementRange::Full,
                         None,
                     )?;
@@ -204,6 +205,7 @@ impl EnvironmentMapIrradianceConvolution {
                     viewport,
                     &material,
                     uniform_buffer_cache,
+                    renderer_resources,
                     ElementRange::Full,
                     None,
                 )?;

@@ -180,6 +180,7 @@ impl HighDynamicRangeRenderer {
             ),
             &material,
             uniform_buffer_cache,
+            renderer_resources,
             Default::default(),
             None,
         )
@@ -253,6 +254,7 @@ impl HighDynamicRangeRenderer {
                         Rect::new(0, 0, dest.size as i32, dest.size as i32),
                         &material,
                         uniform_buffer_cache,
+                        renderer_resources,
                         Default::default(),
                         None,
                     )?;
@@ -305,6 +307,7 @@ impl HighDynamicRangeRenderer {
             viewport,
             &material,
             uniform_buffer_cache,
+            renderer_resources,
             Default::default(),
             None,
         )
@@ -390,6 +393,7 @@ impl HighDynamicRangeRenderer {
             viewport,
             &material,
             uniform_buffer_cache,
+            renderer_resources,
             Default::default(),
             None,
         )

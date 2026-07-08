@@ -264,6 +264,7 @@ impl RenderPassContainer {
         viewport: Rect<i32>,
         material: &RenderMaterial<'_, '_, N>,
         uniform_buffer_cache: &mut UniformBufferCache,
+        renderer_resources: &crate::renderer::resources::RendererResources,
         element_range: ElementRange,
         override_params: Option<&DrawParameters>,
     ) -> Result<DrawCallStatistics, FrameworkError> {
@@ -300,10 +301,14 @@ impl RenderPassContainer {
                             resource.binding,
                         ));
                     } else {
-                        return Err(FrameworkError::Custom(format!(
-                            "No texture bound to {} resource binding!",
-                            resource.name
-                        )));
+                        // T10: Fallback texture binding — when a material has unbound texture
+                        // slots, bind white_dummy so meshes without proper material bindings
+                        // render as opaque white rather than black (0 texture binding).
+                        resource_bindings.push(ResourceBinding::texture(
+                            &renderer_resources.white_dummy,
+                            &renderer_resources.linear_clamp_sampler,
+                            resource.binding,
+                        ));
                     }
                 }
                 ShaderResourceKind::PropertyGroup(ref shader_property_group) => {

@@ -343,6 +343,7 @@ impl DeferredLightRenderer {
                     viewport,
                     &material,
                     uniform_buffer_cache,
+                    renderer_resources,
                     ElementRange::Specific {
                         offset: 0,
                         count: 12,
@@ -501,6 +502,7 @@ impl DeferredLightRenderer {
             viewport,
             &material,
             uniform_buffer_cache,
+            renderer_resources,
             Default::default(),
             None,
         )?;
@@ -646,6 +648,7 @@ impl DeferredLightRenderer {
                     viewport,
                     &material,
                     uniform_buffer_cache,
+                    renderer_resources,
                     Default::default(),
                     Some(&draw_params),
                 )?;
@@ -680,6 +683,7 @@ impl DeferredLightRenderer {
                         viewport,
                         &material,
                         uniform_buffer_cache,
+                        renderer_resources,
                         Default::default(),
                         None,
                     )?;
@@ -890,6 +894,7 @@ impl DeferredLightRenderer {
                             viewport,
                             &material,
                             uniform_buffer_cache,
+                            renderer_resources,
                             Default::default(),
                             None,
                         )?
@@ -955,6 +960,7 @@ impl DeferredLightRenderer {
                             viewport,
                             &material,
                             uniform_buffer_cache,
+                            renderer_resources,
                             Default::default(),
                             None,
                         )?
@@ -1046,6 +1052,7 @@ impl DeferredLightRenderer {
                             viewport,
                             &material,
                             uniform_buffer_cache,
+                            renderer_resources,
                             Default::default(),
                             None,
                         )?

@@ -149,6 +149,7 @@ impl SceneRenderPass for OverlayRenderPass {
                 ctx.observer.viewport,
                 &material,
                 ctx.uniform_buffer_cache,
+                ctx.renderer_resources,
                 Default::default(),
                 None,
             )?;
