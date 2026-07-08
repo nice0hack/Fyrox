@@ -146,15 +146,12 @@ impl WgpuGraphicsServer {
         .map_err(|e| FrameworkError::Custom(format!("Failed to request device: {e}")))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // Prefer sRGB surface format to match the GL backend (which uses sRGB FBOs).
-        // The engine applies HDR tone-mapping in-shader; picking linear here would
-        // cause output to appear doubly-dark/over-saturated.
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .or_else(|| surface_caps.formats.first().copied())
+        // Linear working space: swapchain is a linear format. The OS compositor
+        // does the final linear→sRGB encode for display. This matches the GL
+        // backend (which never enables GL_FRAMEBUFFER_SRGB) and avoids the
+        // wgpu surface-level auto-encode that produced double-encoding under
+        // the previous sRGB-surface convention. See docs/wgpu-color-space.md.
+        let surface_format = crate::color_space::surface_format_for(&surface_caps.formats)
             .ok_or_else(|| FrameworkError::Custom("Surface has no supported formats".into()))?;
 
         let present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };

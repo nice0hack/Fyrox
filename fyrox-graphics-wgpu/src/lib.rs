@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 pub mod buffer;
+pub mod color_space;
 pub mod framebuffer;
 pub mod geometry_buffer;
 pub mod program;
