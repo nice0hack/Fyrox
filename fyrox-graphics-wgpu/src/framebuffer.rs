@@ -179,13 +179,13 @@ impl WgpuFrameBuffer {
         Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: Default::default(), is_backbuffer: true, needs_clear: RefCell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0), msaa_target: RefCell::new(None), post_msaa_resolve_view: RefCell::new(None) }
     }
 
-    fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind, has_color: bool) -> wgpu::RenderPipeline {
+    fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind, has_color: bool, msaa_sample_count: u32) -> wgpu::RenderPipeline {
         let needs_stencil = params.stencil_test.is_some() || params.stencil_op.zpass != fyrox_graphics::StencilAction::Keep || params.stencil_op.fail != fyrox_graphics::StencilAction::Keep || params.stencil_op.zfail != fyrox_graphics::StencilAction::Keep;
         let depth_fmt = df.unwrap_or(wgpu::TextureFormat::Depth32Float);
         let stencil_supported = format_has_stencil(depth_fmt);
         let effective_stencil = needs_stencil && stencil_supported;
         let key = PipelineKey {
-            program_ptr: program as *const WgpuProgram as usize, color_format: cf, depth_format: df, sample_count: server.msaa_sample_count,
+            program_ptr: program as *const WgpuProgram as usize, color_format: cf, depth_format: df, sample_count: msaa_sample_count,
             blend: params.blend.is_some(), depth_test: params.depth_test.is_some(), depth_write: params.depth_write,
             stencil: effective_stencil,
             has_color,
@@ -272,7 +272,7 @@ impl WgpuFrameBuffer {
             fragment: fragment_state,
             primitive: wgpu::PrimitiveState { topology: topo, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: cull, ..Default::default() },
             depth_stencil,
-            multisample: wgpu::MultisampleState { count: server.msaa_sample_count, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState { count: msaa_sample_count, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
         });
@@ -398,7 +398,7 @@ impl WgpuFrameBuffer {
 
         let (all_layouts, extra_vert_count) = build_vertex_layouts(geo);
         let has_color = self.is_backbuffer || !self.color_attachments.is_empty();
-        let pipeline = self.get_or_create_pipeline(&server, prog, params, &all_layouts, cf, df, &pipeline_layout, geo.element_kind(), has_color);
+        let pipeline = self.get_or_create_pipeline(&server, prog, params, &all_layouts, cf, df, &pipeline_layout, geo.element_kind(), has_color, msaa_sample_count);
 
         let bind_group = create_bind_group(&server, prog, resources);
         let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("DrawEnc") });
@@ -480,7 +480,7 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
     fn set_cubemap_face(&self, i: usize, face: CubeMapFace, level: usize) {
         if let Some(a) = self.color_attachments.get(i) { a.set_cube_map_face(Some(face)); a.set_level(level); }
     }
-    fn blit_to(&self, dest: &GpuFrameBuffer, sx0: i32, sy0: i32, sx1: i32, sy1: i32, dx0: i32, dy0: i32, dx1: i32, dy1: i32, c: bool, _d: bool, _s: bool) {
+    fn blit_to(&self, dest: &GpuFrameBuffer, sx0: i32, sy0: i32, sx1: i32, sy1: i32, dx0: i32, dy0: i32, _dx1: i32, dy1: i32, c: bool, _d: bool, _s: bool) {
         // blit_to is color-only per the task note; depth/stencil requires readback dance.
         if !c {
             return;

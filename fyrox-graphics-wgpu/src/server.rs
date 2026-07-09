@@ -77,8 +77,8 @@ pub struct WgpuGraphicsServer {
     pub current_frame: RefCell<Option<wgpu::SurfaceTexture>>,
     /// Whether the backbuffer needs clearing at the start of the next frame.
     pub backbuffer_needs_clear: Cell<bool>,
-    /// Cached depth-stencil texture for the backbuffer, with its (width, height).
-    backbuffer_depth_stencil: RefCell<Option<(u32, u32, GpuTexture)>>,
+    /// Cached depth-stencil texture for the backbuffer, with its (width, height, sample_count).
+    backbuffer_depth_stencil: RefCell<Option<(u32, u32, u32, GpuTexture)>>,
     /// Current polygon fill mode, used to trigger pipeline recreation when it changes.
     pub polygon_fill_mode: Cell<fyrox_graphics::PolygonFillMode>,
     /// Current debug group label, if any.
@@ -349,18 +349,24 @@ impl GraphicsServer for WgpuGraphicsServer {
 
         let mut cache = self.backbuffer_depth_stencil.borrow_mut();
         let needs_recreate = match cache.as_ref() {
-            Some((cw, ch, _)) => *cw != w || *ch != h,
+            Some((cw, ch, sc, _)) => *cw != w || *ch != h || *sc != self.msaa_sample_count,
             None => true,
         };
         if needs_recreate {
             if w > 0 && h > 0 {
-                match self.create_2d_render_target(
-                    "BackbufferDepthStencil",
-                    fyrox_graphics::gpu_texture::PixelKind::D24S8,
-                    w as usize,
-                    h as usize,
-                ) {
-                    Ok(tex) => { *cache = Some((w, h, tex)); }
+                // Use same sample count as color attachment when MSAA is enabled
+                let sample_count = if self.msaa_sample_count > 1 { self.msaa_sample_count } else { 1 };
+                match self.create_texture(GpuTextureDescriptor {
+                    name: "BackbufferDepthStencil",
+                    kind: fyrox_graphics::gpu_texture::GpuTextureKind::Rectangle {
+                        width: w as usize,
+                        height: h as usize,
+                    },
+                    pixel_kind: fyrox_graphics::gpu_texture::PixelKind::D24S8,
+                    sample_count,
+                    ..Default::default()
+                }) {
+                    Ok(tex) => { *cache = Some((w, h, sample_count, tex)); }
                     Err(e) => {
                         log::warn!("Failed to create backbuffer depth-stencil: {e}");
                         *cache = None;
@@ -370,7 +376,7 @@ impl GraphicsServer for WgpuGraphicsServer {
                 *cache = None;
             }
         }
-        let depth_attachment = cache.as_ref().map(|(_, _, tex)| Attachment::depth_stencil(tex.clone()));
+        let depth_attachment = cache.as_ref().map(|(_, _, _, tex)| Attachment::depth_stencil(tex.clone()));
         GpuFrameBuffer(Rc::new(WgpuFrameBuffer::backbuffer(self, depth_attachment)))
     }
     fn create_query(&self) -> Result<GpuQuery, FrameworkError> {

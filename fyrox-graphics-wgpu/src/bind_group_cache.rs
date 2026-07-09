@@ -96,12 +96,12 @@ impl BindGroupCacheKey {
             match b {
                 ResourceBinding::Texture { texture, sampler, binding } => {
                     // Pointer to the underlying trait object — stable for all Rc clones.
-                    let texture_ptr = (&**texture as *const dyn GpuTextureTrait as *const std::ffi::c_void as usize);
-                    let sampler_ptr = (&**sampler as *const dyn GpuSamplerTrait as *const std::ffi::c_void as usize);
+                    let texture_ptr = &**texture as *const dyn GpuTextureTrait as *const std::ffi::c_void as usize;
+                    let sampler_ptr = &**sampler as *const dyn GpuSamplerTrait as *const std::ffi::c_void as usize;
                     keys.push(BindingKey::Texture { texture_ptr, sampler_ptr, binding: *binding });
                 }
                 ResourceBinding::Buffer { buffer, binding, data_usage } => {
-                    let buffer_ptr = (&**buffer as *const dyn GpuBufferTrait as *const std::ffi::c_void as usize);
+                    let buffer_ptr = &**buffer as *const dyn GpuBufferTrait as *const std::ffi::c_void as usize;
                     let (offset, size) = match data_usage {
                         BufferDataUsage::UseEverything => (0, None),
                         BufferDataUsage::UseSegment { offset, size } => (*offset as u64, Some(*size as u64)),
