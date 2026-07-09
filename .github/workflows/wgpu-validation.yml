@@ -23,9 +23,21 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
 
+      - name: Install Vulkan drivers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+
       - name: Check workspace
         run: cargo check --workspace
 
       - name: Build editor release
+        env:
+          WGPU_VALIDATION: "1"
         run: cargo build --release -p editor
         timeout-minutes: 60
+
+      - name: Run GPU smoke test
+        if: runner.os == 'Linux'
+        env:
+          WGPU_VALIDATION: "1"
+        run: cargo test -p fyrox-graphics-wgpu --lib -- --ignored
