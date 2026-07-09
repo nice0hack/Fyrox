@@ -111,8 +111,8 @@
 
                 @vertex fn vs_main(input: VertexInput) -> VertexOutput {
                     var output: VertexOutput;
-                    // Vertex colors are authored in linear; no conversion needed.
-                    output.color = input.vertexColor;
+                    // Vertex colors are U8×4 in sRGB; convert to linear for working-space consistency.
+                    output.color = vec4f(srgb_to_linear(input.vertexColor.rgb), input.vertexColor.a);
                     output.texCoord = input.vertexTexCoord;
                     let vertexOffset = S_RotateVec2(input.vertexTexCoord * 2.0 - 1.0, input.particleRotation);
                     let worldPosition = fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0);

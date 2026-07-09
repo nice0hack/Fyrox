@@ -48,7 +48,7 @@
 
                     @vertex fn vs_main(input: VertexInput) -> VertexOutput {
                         var output: VertexOutput;
-                        output.color = input.vertexColor;
+                        output.color = vec4f(srgb_to_linear(input.vertexColor.rgb), input.vertexColor.a);
                         output.position = properties.worldViewProjection * vec4f(input.vertexPosition, 1.0);
                         return output;
                     }

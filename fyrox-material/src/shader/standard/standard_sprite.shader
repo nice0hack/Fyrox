@@ -82,7 +82,7 @@
                     let dy = input.vertexParams.w;
 
                     output.texCoord = input.vertexTexCoord;
-                    output.color = input.vertexColor;
+                    output.color = vec4f(srgb_to_linear(input.vertexColor.rgb), input.vertexColor.a);
                     let vertexOffset = S_RotateVec2(vec2f(dx, dy), rotation);
                     let worldPosition = fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0);
                     let offset = (vertexOffset.x * fyrox_cameraData.sideVector + vertexOffset.y * fyrox_cameraData.upVector) * size;

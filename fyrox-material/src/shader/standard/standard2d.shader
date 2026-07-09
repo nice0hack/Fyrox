@@ -86,7 +86,7 @@
                     output.texCoord = input.vertexTexCoord;
                     output.fragmentPosition = (fyrox_instanceData.worldMatrix * vec4f(input.vertexPosition, 1.0)).xyz;
                     output.position = fyrox_instanceData.worldViewProjection * vec4f(input.vertexPosition, 1.0);
-                    output.color = input.vertexColor;
+                    output.color = vec4f(srgb_to_linear(input.vertexColor.rgb), input.vertexColor.a);
                     return output;
                 }
                "#,
