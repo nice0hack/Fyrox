@@ -594,6 +594,16 @@ fn create_bind_group(server: &WgpuGraphicsServer, program: &WgpuProgram, groups:
         }
     }).map(|(_, e)| e.clone()).collect();
 
+    debug_assert_eq!(
+        deduped_entries.len(),
+        entries.iter().filter(|e| e.binding < 200).count() + best_size_for_raw.len(),
+        "bind group entry count mismatch after deduplication: {} vs {} (textures/samplers: {}, unique raw buffers: {})",
+        deduped_entries.len(),
+        entries.iter().filter(|e| e.binding < 200).count() + best_size_for_raw.len(),
+        entries.iter().filter(|e| e.binding < 200).count(),
+        best_size_for_raw.len(),
+    );
+
     let bind_group = server.state.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("BG"), layout: &bgl, entries: &deduped_entries });
 
     // Cache and return the Arc-wrapped bind group.

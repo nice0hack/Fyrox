@@ -641,6 +641,9 @@ impl RenderDataBundle {
                         ),
                     );
                 }
+                // Instance-level built-ins are handled by instance_bindings below.
+                // Skip them here to avoid colliding with actual instance data.
+                "fyrox_instanceData" | "fyrox_boneMatrices" => {}
                 _ => match resource_definition.kind {
                     ShaderResourceKind::Texture { fallback, .. } => {
                         material_bindings.push(make_texture_binding(
