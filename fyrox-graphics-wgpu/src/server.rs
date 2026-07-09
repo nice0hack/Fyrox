@@ -91,14 +91,17 @@ impl WgpuGraphicsServer {
         let size = window.inner_size();
 
         #[cfg(not(target_arch = "wasm32"))]
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(window_target.owned_display_handle()),
-        ));
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::new_with_display_handle(
+                Box::new(window_target.owned_display_handle())
+            )
+        });
 
         #[cfg(target_arch = "wasm32")]
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::GL,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         #[cfg(not(target_arch = "wasm32"))]
