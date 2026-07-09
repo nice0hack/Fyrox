@@ -210,6 +210,12 @@ pub trait GraphicsServer: GraphicsServerAsAny {
     /// Returns current capabilities of the graphics server. See [`ServerCapabilities`] for more info.
     fn capabilities(&self) -> ServerCapabilities;
 
+    /// Returns the current MSAA sample count used for the backbuffer and related render targets.
+    /// Defaults to 1 (no MSAA).
+    fn msaa_sample_count(&self) -> u32 {
+        1
+    }
+
     /// Sets current polygon fill mode for front faces, back faces, or both.
     /// The mode of front faces is controlled separately from the mode of back faces,
     /// and `polygon_face` determines which mode is set by this method.

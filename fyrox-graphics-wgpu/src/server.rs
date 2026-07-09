@@ -33,7 +33,7 @@ use fyrox_graphics::error::FrameworkError;
 use fyrox_graphics::framebuffer::{Attachment, GpuFrameBuffer};
 use fyrox_graphics::geometry_buffer::{GpuGeometryBuffer, GpuGeometryBufferDescriptor};
 use fyrox_graphics::gpu_program::{GpuProgram, GpuShader, ShaderKind, ShaderResourceDefinition};
-use fyrox_graphics::gpu_texture::{GpuTexture, GpuTextureDescriptor};
+use fyrox_graphics::gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind, GpuTextureTrait};
 use fyrox_graphics::query::GpuQuery;
 use fyrox_graphics::read_buffer::GpuAsyncReadBuffer;
 use fyrox_graphics::sampler::{GpuSampler, GpuSamplerDescriptor};
@@ -80,7 +80,9 @@ pub struct WgpuGraphicsServer {
     /// Cached depth-stencil texture for the backbuffer, with its (width, height).
     backbuffer_depth_stencil: RefCell<Option<(u32, u32, GpuTexture)>>,
     /// Current polygon fill mode, used to trigger pipeline recreation when it changes.
-    polygon_fill_mode: Cell<fyrox_graphics::PolygonFillMode>,
+    pub polygon_fill_mode: Cell<fyrox_graphics::PolygonFillMode>,
+    /// Current debug group label, if any.
+    current_debug_group: RefCell<Option<String>>,
 }
 
 /// Controls which GPU is preferred when selecting a WGPU adapter.
@@ -308,6 +310,7 @@ impl WgpuGraphicsServer {
             current_frame: RefCell::new(None),
             backbuffer_needs_clear: Cell::new(true),
             backbuffer_depth_stencil: RefCell::new(None),
+            current_debug_group: RefCell::new(None),
         });
 
         *server.weak_self.borrow_mut() = Some(Rc::downgrade(&server));
@@ -320,6 +323,9 @@ impl WgpuGraphicsServer {
     }
     pub fn non_filtering_sampler(&self) -> &wgpu::Sampler {
         &self.non_filtering_sampler
+    }
+    pub fn current_debug_group_label(&self) -> Option<String> {
+        self.current_debug_group.borrow().clone()
     }
 }
 
@@ -431,13 +437,78 @@ impl GraphicsServer for WgpuGraphicsServer {
             max_lod_bias: 16.0,
         }
     }
-    fn set_polygon_fill_mode(&self, _face: PolygonFace, _mode: PolygonFillMode) {
-        log::warn!("set_polygon_fill_mode: wgpu requires pipeline recreation");
+    fn set_polygon_fill_mode(&self, _face: PolygonFace, mode: PolygonFillMode) {
+        if self.polygon_fill_mode.get() != mode {
+            self.polygon_fill_mode.set(mode);
+            self.pipeline_cache.borrow_mut().clear();
+        }
     }
-    fn generate_mipmap(&self, _texture: &GpuTexture) {
-        log::warn!("generate_mipmap: not yet fully implemented");
+    fn generate_mipmap(&self, texture: &GpuTexture) {
+        let Some(wgpu_tex) = texture.as_any().downcast_ref::<WgpuTexture>() else {
+            log::warn!("generate_mipmap: texture is not a WgpuTexture, skipping");
+            return;
+        };
+
+        let src_texture = wgpu_tex.wgpu_texture();
+        let format = src_texture.format();
+        let kind = wgpu_tex.kind();
+        let mip_level_count = src_texture.mip_level_count();
+
+        // Only 2D Rectangle textures are supported for now
+        let GpuTextureKind::Rectangle { .. } = kind else {
+            log::warn!("generate_mipmap: only 2D Rectangle textures are supported");
+            return;
+        };
+
+        if mip_level_count <= 1 {
+            return;
+        }
+
+        // Use wgpu's built-in TextureBlitter with linear filtering for proper downsampling
+        let blitter = wgpu::util::TextureBlitterBuilder::new(&self.state.device, format)
+            .sample_type(wgpu::FilterMode::Linear)
+            .build();
+
+        let mut encoder = self.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mipmap_gen_encoder"),
+        });
+
+        for mip_level in 1..mip_level_count {
+            let src_view = src_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("mipmap_gen_src_view"),
+                format: None,
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                aspect: wgpu::TextureAspect::All,
+                base_mip_level: mip_level - 1,
+                mip_level_count: Some(1),
+                base_array_layer: 0,
+                array_layer_count: None,
+                ..Default::default()
+            });
+
+            let dst_view = src_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("mipmap_gen_dst_view"),
+                format: None,
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                aspect: wgpu::TextureAspect::All,
+                base_mip_level: mip_level,
+                mip_level_count: Some(1),
+                base_array_layer: 0,
+                array_layer_count: None,
+                ..Default::default()
+            });
+
+            blitter.copy(&self.state.device, &mut encoder, &src_view, &dst_view);
+        }
+
+        let cmd_buffer = encoder.finish();
+        self.state.queue.submit(std::iter::once(cmd_buffer));
     }
     fn memory_usage(&self) -> ServerMemoryUsage { self.memory_usage.borrow().clone() }
-    fn push_debug_group(&self, _name: &str) {}
-    fn pop_debug_group(&self) {}
+    fn push_debug_group(&self, name: &str) {
+        *self.current_debug_group.borrow_mut() = Some(name.to_string());
+    }
+    fn pop_debug_group(&self) {
+        *self.current_debug_group.borrow_mut() = None;
+    }
 }

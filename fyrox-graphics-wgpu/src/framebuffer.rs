@@ -151,6 +151,7 @@ pub struct PipelineKey {
     extra_vert_count: u8,
     color_write: u32,
     stencil_write_mask: u32,
+    fill_mode: fyrox_graphics::PolygonFillMode,
 }
 
 pub struct WgpuFrameBuffer {
@@ -192,6 +193,7 @@ impl WgpuFrameBuffer {
             extra_vert_count: all_layouts.len() as u8,
             color_write: color_mask_to_wgpu(&params.color_write).bits(),
             stencil_write_mask: params.stencil_op.write_mask,
+            fill_mode: server.polygon_fill_mode.get(),
         };
         let key_hash = { let mut h = DefaultHasher::new(); key.hash(&mut h); h.finish() };
         { let cache = server.pipeline_cache.borrow(); if let Some(p) = cache.get(&key_hash) { return p.clone(); } }
@@ -250,10 +252,15 @@ impl WgpuFrameBuffer {
 
         let cull = match params.cull_face { Some(CullFace::Back) => Some(wgpu::Face::Back), Some(CullFace::Front) => Some(wgpu::Face::Front), None => None };
 
-        let topo = match element_kind {
-            fyrox_graphics::ElementKind::Triangle => wgpu::PrimitiveTopology::TriangleList,
-            fyrox_graphics::ElementKind::Line => wgpu::PrimitiveTopology::LineList,
-            fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
+        let fill_mode = server.polygon_fill_mode.get();
+        let topo = match fill_mode {
+            fyrox_graphics::PolygonFillMode::Fill => match element_kind {
+                fyrox_graphics::ElementKind::Triangle => wgpu::PrimitiveTopology::TriangleList,
+                fyrox_graphics::ElementKind::Line => wgpu::PrimitiveTopology::LineList,
+                fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
+            },
+            fyrox_graphics::PolygonFillMode::Line => wgpu::PrimitiveTopology::LineList,
+            fyrox_graphics::PolygonFillMode::Point => wgpu::PrimitiveTopology::PointList,
         };
 
         let color_write_mask = wgpu::ColorWrites::from_bits_retain(key.color_write);
@@ -395,6 +402,9 @@ impl WgpuFrameBuffer {
 
         let bind_group = create_bind_group(&server, prog, resources);
         let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("DrawEnc") });
+        if let Some(label) = server.current_debug_group_label() {
+            encoder.push_debug_group(&label);
+        }
 
         let depth_view = self.depth_attachment.as_ref().map(|a| {
             let wt = a.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
@@ -448,6 +458,9 @@ impl WgpuFrameBuffer {
             rp.draw_indexed(start_idx..end_idx, 0, 0..instance_count);
         }
 
+        if server.current_debug_group_label().is_some() {
+            encoder.pop_debug_group();
+        }
         server.state.queue.submit(std::iter::once(encoder.finish()));
         // For MSAA: after render pass + submit, surface has resolved data.
         // Store a fresh surface view for read_pixels() to use.
@@ -467,8 +480,127 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
     fn set_cubemap_face(&self, i: usize, face: CubeMapFace, level: usize) {
         if let Some(a) = self.color_attachments.get(i) { a.set_cube_map_face(Some(face)); a.set_level(level); }
     }
-    fn blit_to(&self, _dest: &GpuFrameBuffer, _sx0: i32, _sy0: i32, _sx1: i32, _sy1: i32, _dx0: i32, _dy0: i32, _dx1: i32, _dy1: i32, _c: bool, _d: bool, _s: bool) {
-        log::warn!("blit_to not yet implemented for wgpu");
+    fn blit_to(&self, dest: &GpuFrameBuffer, sx0: i32, sy0: i32, sx1: i32, sy1: i32, dx0: i32, dy0: i32, dx1: i32, dy1: i32, c: bool, _d: bool, _s: bool) {
+        // blit_to is color-only per the task note; depth/stencil requires readback dance.
+        if !c {
+            return;
+        }
+        if _d {
+            log::warn!("blit_to: depth blit not yet implemented for wgpu");
+        }
+        if _s {
+            log::warn!("blit_to: stencil blit not yet implemented for wgpu");
+        }
+
+        let server = match self.server.upgrade() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let dest = match dest.as_any().downcast_ref::<WgpuFrameBuffer>() {
+            Some(d) => d,
+            None => {
+                log::warn!("blit_to: destination is not a WgpuFrameBuffer");
+                return;
+            }
+        };
+
+        // Get source texture (color attachment or backbuffer surface).
+        let (src_tex, src_height) = if self.is_backbuffer {
+            let cfg = server.surface_config.read().unwrap();
+            let height = cfg.height;
+            let texture = match server.current_frame.borrow().as_ref() {
+                Some(f) => f.texture.clone(),
+                None => return,
+            };
+            (texture, height)
+        } else {
+            let attach = match self.color_attachments.first() {
+                Some(a) => a,
+                None => return,
+            };
+            let wt = attach.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+            let h = match attach.texture.kind() {
+                GpuTextureKind::Rectangle { width: _, height } => height as u32,
+                _ => return,
+            };
+            (wt.wgpu_texture().clone(), h)
+        };
+
+        // Get destination texture.
+        let (dst_tex, dst_height) = if dest.is_backbuffer {
+            let cfg = server.surface_config.read().unwrap();
+            let height = cfg.height;
+            let texture = match server.current_frame.borrow().as_ref() {
+                Some(f) => f.texture.clone(),
+                None => return,
+            };
+            (texture, height)
+        } else {
+            let attach = match dest.color_attachments.first() {
+                Some(a) => a,
+                None => return,
+            };
+            let wt = attach.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+            let h = match attach.texture.kind() {
+                GpuTextureKind::Rectangle { width: _, height } => height as u32,
+                _ => return,
+            };
+            (wt.wgpu_texture().clone(), h)
+        };
+
+        let extent_x = (sx1 - sx0).unsigned_abs() as u32;
+        let extent_y = (sy1 - sy0).unsigned_abs() as u32;
+
+        // GL uses bottom-left origin; wgpu uses top-left.
+        // Source: sy0 < sy1 → origin.y = height - sy1, sy0 > sy1 → origin.y = height - sy0 (flipped).
+        let src_origin_y = if sy0 < sy1 {
+            src_height - sy1 as u32
+        } else {
+            src_height - sy0 as u32
+        };
+
+        // Destination: dy0 < dy1 in GL maps to wgpu y = height - dy1.
+        // If source is flipped (sy0 > sy1), we also need to shift destination down.
+        let dst_origin_y = if dy0 < dy1 {
+            dst_height - dy1 as u32
+        } else {
+            dst_height - dy0 as u32
+        };
+
+        let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("BlitToEnc"),
+        });
+
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &src_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: sx0 as u32,
+                    y: src_origin_y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &dst_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: dx0 as u32,
+                    y: dst_origin_y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: extent_x,
+                height: extent_y,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        server.state.queue.submit(std::iter::once(encoder.finish()));
     }
     fn read_pixels(&self, read_target: ReadTarget) -> Option<Vec<u8>> {
         let server = self.server.upgrade()?;
