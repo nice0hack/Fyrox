@@ -108,10 +108,13 @@ impl SceneRenderPass for HighlightRenderPass {
         }
 
         // Skip highlight rendering when nothing is selected.
-        // Without this, the edge-detect shader reads stale FBO content on wgpu
-        // because the deferred clear never executes when no draw calls happen.
+        // Root-cause fix: explicitly clear the FBO so stale content doesn't corrupt
+        // the next frame. Previously returned early, leaving the wgpu lazy-clear
+        // (needs_clear flag) uncleared when zero draws execute.
         if self.nodes_to_highlight.is_empty() {
-            return Ok(Default::default());
+            self.framebuffer
+                .clear(ctx.observer.viewport, Some(Color::TRANSPARENT), None, None);
+            return Ok(stats);
         }
 
         // Draw selected nodes in the temporary frame buffer first.
