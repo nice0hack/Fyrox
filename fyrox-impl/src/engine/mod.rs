@@ -1019,7 +1019,7 @@ pub type GraphicsServerConstructorCallback = dyn Fn(
 ) -> GraphicsServerConstructorResult;
 
 /// Graphics server constructor is used to initialize different graphics servers in unified manner.
-/// [`Default`] trait implementation currently creates OpenGL graphics server.
+/// [`Default`] trait implementation currently creates wgpu graphics server.
 #[derive(Clone)]
 pub struct GraphicsServerConstructor(Rc<GraphicsServerConstructorCallback>);
 
