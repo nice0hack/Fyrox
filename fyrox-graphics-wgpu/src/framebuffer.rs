@@ -34,7 +34,7 @@ use fyrox_graphics::{
     gpu_texture::{CubeMapFace, GpuTexture, GpuTextureKind},
     CompareFunc, CullFace, DrawParameters, ElementRange, BlendMode,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Weak;
@@ -158,18 +158,24 @@ pub struct WgpuFrameBuffer {
     depth_attachment: Option<Attachment>,
     color_attachments: Vec<Attachment>,
     is_backbuffer: bool,
-    needs_clear: Cell<bool>,
+    needs_clear: RefCell<bool>,
     pending_clear_color: RefCell<wgpu::Color>,
     pending_clear_depth: RefCell<f32>,
+    /// Cached MSAA render target + single-sample resolve texture for backbuffer MSAA.
+    /// Format: (msaa_tex, msaa_view, resolve_tex, resolve_view, width, height).
+    msaa_target: RefCell<Option<(wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView, u32, u32)>>,
+    /// Stores the surface view after an MSAA render pass so read_pixels can access the
+    /// resolved data. Cleared when a new non-MSAA frame begins.
+    post_msaa_resolve_view: RefCell<Option<wgpu::TextureView>>,
 }
 
 impl WgpuFrameBuffer {
     pub fn new(server: &WgpuGraphicsServer, depth: Option<Attachment>, colors: Vec<Attachment>) -> Result<Self, FrameworkError> {
-        Ok(Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: colors, is_backbuffer: false, needs_clear: Cell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0) })
+        Ok(Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: colors, is_backbuffer: false, needs_clear: RefCell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0), msaa_target: RefCell::new(None), post_msaa_resolve_view: RefCell::new(None) })
     }
 
     pub fn backbuffer(server: &WgpuGraphicsServer, depth: Option<Attachment>) -> Self {
-        Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: Default::default(), is_backbuffer: true, needs_clear: Cell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0) }
+        Self { server: server.weak_ref(), depth_attachment: depth, color_attachments: Default::default(), is_backbuffer: true, needs_clear: RefCell::new(false), pending_clear_color: RefCell::new(wgpu::Color::BLACK), pending_clear_depth: RefCell::new(1.0), msaa_target: RefCell::new(None), post_msaa_resolve_view: RefCell::new(None) }
     }
 
     fn get_or_create_pipeline(&self, server: &WgpuGraphicsServer, program: &WgpuProgram, params: &DrawParameters, all_layouts: &[wgpu::VertexBufferLayout<'static>], cf: wgpu::TextureFormat, df: Option<wgpu::TextureFormat>, pipeline_layout: &wgpu::PipelineLayout, element_kind: fyrox_graphics::ElementKind, has_color: bool) -> wgpu::RenderPipeline {
@@ -304,6 +310,67 @@ impl WgpuFrameBuffer {
             Some(frame.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default()))
         } else { None };
 
+        // MSAA: get or create cached multisampled render target for backbuffer MSAA.
+        // When server.msaa_sample_count > 1, we render to msaa_tex and resolve to surface.
+        let do_msaa = self.is_backbuffer && server.msaa_sample_count > 1;
+        let msaa_sample_count = if do_msaa { server.msaa_sample_count } else { 1 };
+        let color_view = if self.is_backbuffer {
+            let cfg = server.surface_config.read().unwrap();
+            let width = cfg.width;
+            let height = cfg.height;
+            let format = cfg.format;
+            drop(cfg);
+            if do_msaa {
+                // Lazily create or reuse MSAA + resolve textures.
+                let mut msaa_target = self.msaa_target.borrow_mut();
+                let needs_recreate = msaa_target.as_ref().map_or(true, |(_, _, _, _, w, h)| *w != width || *h != height);
+                if needs_recreate {
+                    let msaa_tex = server.state.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("MsaaColor"),
+                        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: msaa_sample_count,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    });
+                    let msaa_view = msaa_tex.create_view(&wgpu::TextureViewDescriptor { label: Some("MsaaColorView"), ..Default::default() });
+                    let resolve_tex = server.state.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("MsaaResolve"),
+                        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    });
+                    let resolve_view = resolve_tex.create_view(&wgpu::TextureViewDescriptor { label: Some("MsaaResolveView"), ..Default::default() });
+                    *msaa_target = Some((msaa_tex, msaa_view, resolve_tex, resolve_view, width, height));
+                }
+                let msaa_target = msaa_target.as_ref().unwrap();
+                Some(msaa_target.1.clone())
+            } else {
+                surface_tex.clone()
+            }
+        } else {
+            self.color_attachments.first().map(|first_color| {
+                if let Some(face) = first_color.cube_map_face() {
+                    let wt = first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+                    wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: cubemap_face_to_layer(face),
+                        array_layer_count: Some(1),
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                } else {
+                    first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone()
+                }
+            })
+        };
+
         let cf = if self.is_backbuffer { server.surface_config.read().unwrap().format }
         else if let Some(fc) = self.color_attachments.first() { texture_format_for_attachment(&fc.texture) }
         else { wgpu::TextureFormat::Rgba8Unorm };
@@ -328,25 +395,6 @@ impl WgpuFrameBuffer {
 
         let bind_group = create_bind_group(&server, prog, resources);
         let mut encoder = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("DrawEnc") });
-
-        let color_view = if self.is_backbuffer {
-            Some(surface_tex.unwrap())
-        } else {
-            self.color_attachments.first().map(|first_color| {
-                if let Some(face) = first_color.cube_map_face() {
-                    let wt = first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
-                    wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_array_layer: cubemap_face_to_layer(face),
-                        array_layer_count: Some(1),
-                        mip_level_count: Some(1),
-                        ..Default::default()
-                    })
-                } else {
-                    first_color.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone()
-                }
-            })
-        };
 
         let depth_view = self.depth_attachment.as_ref().map(|a| {
             let wt = a.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
@@ -374,7 +422,7 @@ impl WgpuFrameBuffer {
             } else {
                 (wgpu::LoadOp::Load, wgpu::LoadOp::Load, wgpu::LoadOp::Load)
             };
-            let color_att = color_view.as_ref().map(|view| wgpu::RenderPassColorAttachment { view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store } });
+            let color_att = color_view.as_ref().map(|view| wgpu::RenderPassColorAttachment { view, resolve_target: if do_msaa { surface_tex.as_ref() } else { None }, depth_slice: None, ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store } });
             let color_att_ref: &[Option<wgpu::RenderPassColorAttachment<'_>>] = if color_att.is_some() { &[color_att] } else { &[] };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("DrawRP"),
@@ -401,6 +449,14 @@ impl WgpuFrameBuffer {
         }
 
         server.state.queue.submit(std::iter::once(encoder.finish()));
+        // For MSAA: after render pass + submit, surface has resolved data.
+        // Store a fresh surface view for read_pixels() to use.
+        if do_msaa {
+            if let Some(ref frame) = *server.current_frame.borrow() {
+                let resolve_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                self.post_msaa_resolve_view.replace(Some(resolve_view));
+            }
+        }
         Ok(DrawCallStatistics { triangles: count * instance_count as usize })
     }
 }
@@ -416,6 +472,52 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
     }
     fn read_pixels(&self, read_target: ReadTarget) -> Option<Vec<u8>> {
         let server = self.server.upgrade()?;
+
+        // Backbuffer color read: use SurfaceTexture directly (it derefs to wgpu::Texture).
+        // SurfaceTexture is valid before present() and holds the correct data
+        // (resolved surface after MSAA render or current frame after non-MSAA render).
+        if let ReadTarget::Color(0) = read_target {
+            if self.is_backbuffer {
+                let frame = server.current_frame.borrow();
+                let surface = frame.as_ref()?;
+                // SurfaceTexture has a `texture` field.
+                let texture: &wgpu::Texture = &surface.texture;
+                let cfg = server.surface_config.read().unwrap();
+                let width = cfg.width;
+                let height = cfg.height;
+                let fmt = cfg.format;
+                drop(cfg);
+                let bps = fmt.block_copy_size(None).unwrap_or(4) as usize;
+                let bytes_per_row = (width as usize * bps).max(256);
+                let padded_total = bytes_per_row * (height as usize - 1) + width as usize * bps;
+                let buf = server.state.device.create_buffer(&wgpu::BufferDescriptor { label: Some("ReadPx"), size: padded_total as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                let mut enc = server.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ReadPxEnc") });
+                enc.copy_texture_to_buffer(wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row as u32), rows_per_image: Some(height as u32) } }, wgpu::Extent3d { width, height, depth_or_array_layers: 1 });
+                drop(frame);
+                server.state.queue.submit(std::iter::once(enc.finish()));
+                let slice = buf.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+                server.state.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+                rx.recv().ok()?.ok()?;
+                let mapped = slice.get_mapped_range();
+                let unpadded_row = width as usize * bps;
+                let mut result = vec![0u8; unpadded_row * height as usize];
+                if bytes_per_row == unpadded_row {
+                    result.copy_from_slice(&mapped);
+                } else {
+                    for y in 0..height as usize {
+                        let src_off = y * bytes_per_row;
+                        let dst_off = y * unpadded_row;
+                        result[dst_off..dst_off + unpadded_row].copy_from_slice(&mapped[src_off..src_off + unpadded_row]);
+                    }
+                }
+                drop(mapped);
+                buf.unmap();
+                return Some(result);
+            }
+        }
+
         let texture = match read_target {
             ReadTarget::Depth | ReadTarget::Stencil => &self.depth_attachment.as_ref()?.texture,
             ReadTarget::Color(i) => &self.color_attachments.get(i)?.texture,
@@ -462,7 +564,7 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
         if let Some(d) = depth {
             *self.pending_clear_depth.borrow_mut() = d;
         }
-        self.needs_clear.set(true);
+        self.needs_clear.replace(true);
     }
     fn draw(&self, geometry: &GpuGeometryBuffer, viewport: Rect<i32>, program: &GpuProgram, params: &DrawParameters, resources: &[ResourceBindGroup], element_range: ElementRange) -> Result<DrawCallStatistics, FrameworkError> {
         self.do_draw(1, geometry, viewport, program, params, resources, element_range)

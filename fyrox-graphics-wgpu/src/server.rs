@@ -79,6 +79,8 @@ pub struct WgpuGraphicsServer {
     pub backbuffer_needs_clear: Cell<bool>,
     /// Cached depth-stencil texture for the backbuffer, with its (width, height).
     backbuffer_depth_stencil: RefCell<Option<(u32, u32, GpuTexture)>>,
+    /// Current polygon fill mode, used to trigger pipeline recreation when it changes.
+    polygon_fill_mode: Cell<fyrox_graphics::PolygonFillMode>,
 }
 
 /// Controls which GPU is preferred when selecting a WGPU adapter.
@@ -272,7 +274,7 @@ impl WgpuGraphicsServer {
         surface.configure(&device, &surface_config);
 
         // TODO: Force `msaa_sample_count` to 1 in the wgpu backend. Full MSAA support requires creating multisampled render targets and resolve targets, which is a larger feature.
-        let msaa = 1u32; // msaa_sample_count.unwrap_or(1).max(1) as u32;
+        let msaa = _msaa_sample_count.unwrap_or(1).max(1) as u32;
 
         let non_filtering_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("NonFilteringSampler"),
@@ -302,6 +304,7 @@ impl WgpuGraphicsServer {
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),
             dummy_vertex_buffer,
             non_filtering_sampler,
+            polygon_fill_mode: Cell::new(fyrox_graphics::PolygonFillMode::Fill),
             current_frame: RefCell::new(None),
             backbuffer_needs_clear: Cell::new(true),
             backbuffer_depth_stencil: RefCell::new(None),

@@ -437,6 +437,8 @@ pub struct GpuTextureDescriptor<'a> {
     /// should provide the actual mip map level defined by the provided value, otherwise the
     /// rendering will be incorrect (probably just black on majority of implementations) and glitchy.
     pub max_level: usize,
+    /// Number of samples for MSAA render targets. Defaults to 1 (no MSAA).
+    pub sample_count: u32,
 }
 
 impl Default for GpuTextureDescriptor<'_> {
@@ -454,6 +456,7 @@ impl Default for GpuTextureDescriptor<'_> {
             data: None,
             base_level: 0,
             max_level: 1000,
+            sample_count: 1,
         }
     }
 }
@@ -512,6 +515,11 @@ pub trait GpuTextureTrait: GpuTextureAsAny {
 
     /// Returns pixel kind of the texture.
     fn pixel_kind(&self) -> PixelKind;
+
+    /// Returns the (width, height) dimensions of the texture.
+    fn dimensions(&self) -> (u32, u32) {
+        (0, 0)
+    }
 }
 
 define_shared_wrapper!(GpuTexture<dyn GpuTextureTrait>);

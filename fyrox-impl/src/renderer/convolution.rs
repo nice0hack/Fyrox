@@ -62,6 +62,7 @@ impl EnvironmentMapSpecularConvolution {
             data: None,
             base_level: 0,
             max_level: mip_count,
+            sample_count: 1,
         })?;
         Ok(Self {
             framebuffer: server.create_frame_buffer(None, vec![Attachment::color(cube_map)])?,
@@ -150,6 +151,7 @@ impl EnvironmentMapIrradianceConvolution {
             data: None,
             base_level: 0,
             max_level: 1,
+            sample_count: 1,
         })?;
         Ok(Self {
             framebuffer: server.create_frame_buffer(None, vec![Attachment::color(cube_map)])?,

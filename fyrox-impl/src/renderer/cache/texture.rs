@@ -176,6 +176,7 @@ fn create_gpu_texture(
         data: Some(texture.data()),
         base_level: texture.base_level(),
         max_level: texture.max_level(),
+        sample_count: 1,
     })?;
 
     Ok(TextureRenderData {

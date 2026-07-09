@@ -145,7 +145,7 @@ impl WgpuTexture {
             label: if server.named_objects { Some(desc.name) } else { None },
             size: wgpu::Extent3d { width, height, depth_or_array_layers: depth_or_layers },
             mip_level_count: mip_count,
-            sample_count: 1,
+            sample_count: desc.sample_count.max(1),
             dimension,
             format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -293,4 +293,12 @@ impl GpuTextureTrait for WgpuTexture {
     }
     fn kind(&self) -> GpuTextureKind { self.kind.get() }
     fn pixel_kind(&self) -> PixelKind { self.pixel_kind.get() }
+    fn dimensions(&self) -> (u32, u32) {
+        match self.kind.get() {
+            GpuTextureKind::Line { length } => (length as u32, 1),
+            GpuTextureKind::Rectangle { width, height } => (width as u32, height as u32),
+            GpuTextureKind::Cube { size } => (size as u32, size as u32),
+            GpuTextureKind::Volume { width, height, depth: _ } => (width as u32, height as u32),
+        }
+    }
 }
