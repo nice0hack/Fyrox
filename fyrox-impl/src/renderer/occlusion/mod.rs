@@ -371,6 +371,9 @@ impl OcclusionTester {
 
         let tile_size = self.tile_size as i32;
         let frame_buffer_height = self.frame_size.y as f32;
+        // `project()` emits OpenGL bottom-left Y; the shader flips wgpu top-left
+        // fragCoord.y via `frameBufferHeight - fragCoord.y`. Both equal frame_size.y.
+        debug_assert_eq!(frame_buffer_height as i32, viewport.h());
         let properties = PropertyGroup::from([
             property("viewProjection", &self.view_projection),
             property("tileSize", &tile_size),
