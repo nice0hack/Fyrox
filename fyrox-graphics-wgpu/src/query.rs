@@ -27,22 +27,48 @@ use std::cell::Cell;
 use std::fmt::Debug;
 use std::rc::Weak;
 
+/// Wgpu implementation of [`GpuQueryTrait`](fyrox_graphics::query::GpuQueryTrait).
+///
+/// **Stub implementation**: wgpu does not currently expose occlusion queries,
+/// so this type tracks the active state but always returns `u32::MAX` from
+/// [`try_get_result`](Self::try_get_result). This is sufficient for the engine's
+/// query-based culling to work (everything is considered visible).
 pub struct WgpuQuery {
     _server: Weak<WgpuGraphicsServer>,
     active: Cell<bool>,
 }
 
-impl Debug for WgpuQuery { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("WgpuQuery").field("active", &self.active.get()).finish() } }
+impl Debug for WgpuQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgpuQuery")
+            .field("active", &self.active.get())
+            .finish()
+    }
+}
 
 impl WgpuQuery {
+    /// Creates a new stub query.
     pub fn new(server: &WgpuGraphicsServer) -> Result<Self, FrameworkError> {
-        Ok(Self { _server: server.weak_ref(), active: Cell::new(false) })
+        Ok(Self {
+            _server: server.weak_ref(),
+            active: Cell::new(false),
+        })
     }
 }
 
 impl GpuQueryTrait for WgpuQuery {
-    fn begin(&self, _kind: QueryKind) { self.active.set(true); }
-    fn end(&self) { self.active.set(false); }
-    fn is_started(&self) -> bool { self.active.get() }
-    fn try_get_result(&self) -> Option<QueryResult> { Some(QueryResult::SamplesPassed(u32::MAX)) }
+    fn begin(&self, _kind: QueryKind) {
+        self.active.set(true);
+    }
+    fn end(&self) {
+        self.active.set(false);
+    }
+    fn is_started(&self) -> bool {
+        self.active.get()
+    }
+    /// Always returns `Some(QueryResult::SamplesPassed(u32::MAX))` — see the
+    /// struct-level documentation for details.
+    fn try_get_result(&self) -> Option<QueryResult> {
+        Some(QueryResult::SamplesPassed(u32::MAX))
+    }
 }

@@ -22,12 +22,16 @@ use crate::server::WgpuGraphicsServer;
 use fyrox_graphics::{
     core::{array_as_u8_slice, math::TriangleDefinition},
     error::FrameworkError,
-    geometry_buffer::{AttributeKind, ElementsDescriptor, GpuGeometryBufferDescriptor, GpuGeometryBufferTrait},
+    geometry_buffer::{
+        AttributeKind, ElementsDescriptor, GpuGeometryBufferDescriptor, GpuGeometryBufferTrait,
+    },
     ElementKind,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Weak;
 
+/// Maps a Fyrox [`AttributeKind`] + component count + normalization flag to a
+/// wgpu [`VertexFormat`].
 fn attribute_format(kind: AttributeKind, cc: usize, normalized: bool) -> wgpu::VertexFormat {
     match (kind, cc, normalized) {
         (AttributeKind::Float, 1, _) => wgpu::VertexFormat::Float32,
@@ -48,6 +52,13 @@ fn attribute_format(kind: AttributeKind, cc: usize, normalized: bool) -> wgpu::V
     }
 }
 
+/// Wgpu implementation of [`GpuGeometryBufferTrait`](fyrox_graphics::geometry_buffer::GpuGeometryBufferTrait).
+///
+/// Holds vertex buffers, their layouts, and an index (element) buffer for indexed
+/// drawing. Supports triangles, lines, and points as element types.
+///
+/// Vertex attribute layouts are leaked once at construction to satisfy wgpu's
+/// `'static` lifetime requirement — see the comment in [`new`](Self::new) for details.
 pub struct WgpuGeometryBuffer {
     _server: Weak<WgpuGraphicsServer>,
     vertex_buffers: RefCell<Vec<wgpu::Buffer>>,
@@ -58,7 +69,15 @@ pub struct WgpuGeometryBuffer {
 }
 
 impl WgpuGeometryBuffer {
-    pub fn new(server: &WgpuGraphicsServer, desc: GpuGeometryBufferDescriptor) -> Result<Self, FrameworkError> {
+    /// Creates a new geometry buffer from the given descriptor.
+    ///
+    /// Creates vertex buffers with their attribute layouts and an index buffer.
+    /// Attribute layouts are leaked once to satisfy wgpu's `'static` lifetime
+    /// requirement for `VertexBufferLayout::attributes`.
+    pub fn new(
+        server: &WgpuGraphicsServer,
+        desc: GpuGeometryBufferDescriptor,
+    ) -> Result<Self, FrameworkError> {
         let mut vertex_buffers = Vec::new();
         let mut vertex_buffer_layouts = Vec::new();
 
@@ -66,22 +85,47 @@ impl WgpuGeometryBuffer {
             let data_size = buf.data.bytes.map(|b| b.len()).unwrap_or(0);
             let label_str = format!("{}VB{i}", desc.name);
             let buffer = server.state.device.create_buffer(&wgpu::BufferDescriptor {
-                label: if server.named_objects { Some(&label_str) } else { None },
+                label: if server.named_objects {
+                    Some(&label_str)
+                } else {
+                    None
+                },
                 size: data_size.max(1) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            if let Some(data) = buf.data.bytes { if !data.is_empty() { server.state.queue.write_buffer(&buffer, 0, data); } }
+            if let Some(data) = buf.data.bytes {
+                if !data.is_empty() {
+                    server.state.queue.write_buffer(&buffer, 0, data);
+                }
+            }
 
             let mut attributes = Vec::new();
             let mut offset = 0u64;
             for attr in buf.attributes {
-                attributes.push(wgpu::VertexAttribute { format: attribute_format(attr.kind, attr.component_count, attr.normalized), offset, shader_location: attr.location });
+                attributes.push(wgpu::VertexAttribute {
+                    format: attribute_format(attr.kind, attr.component_count, attr.normalized),
+                    offset,
+                    shader_location: attr.location,
+                });
                 offset += (attr.kind.size() * attr.component_count) as u64;
             }
 
-            let step_mode = if buf.attributes.iter().any(|a| a.divisor > 0) { wgpu::VertexStepMode::Instance } else { wgpu::VertexStepMode::Vertex };
-            vertex_buffer_layouts.push(wgpu::VertexBufferLayout { array_stride: buf.data.element_size as u64, step_mode, attributes: attributes.leak() });
+            let step_mode = if buf.attributes.iter().any(|a| a.divisor > 0) {
+                wgpu::VertexStepMode::Instance
+            } else {
+                wgpu::VertexStepMode::Vertex
+            };
+            // NOTE: Attributes are leaked to satisfy wgpu's `'static` lifetime requirement
+            // for `VertexBufferLayout::attributes`. Each geometry buffer leaks one small
+            // `Vec<VertexAttribute>` per vertex buffer (typically < 100 bytes). This is
+            // acceptable because geometry buffers are long-lived (tied to mesh lifetime)
+            // and relatively few in number.
+            vertex_buffer_layouts.push(wgpu::VertexBufferLayout {
+                array_stride: buf.data.element_size as u64,
+                step_mode,
+                attributes: attributes.leak(),
+            });
             vertex_buffers.push(buffer);
         }
 
@@ -93,21 +137,73 @@ impl WgpuGeometryBuffer {
 
         let ib_label = format!("{}IB", desc.name);
         let element_buffer = server.state.device.create_buffer(&wgpu::BufferDescriptor {
-            label: if server.named_objects { Some(&ib_label) } else { None },
+            label: if server.named_objects {
+                Some(&ib_label)
+            } else {
+                None
+            },
             size: element_data.len().max(1) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        if !element_data.is_empty() { server.state.queue.write_buffer(&element_buffer, 0, element_data); }
+        if !element_data.is_empty() {
+            server
+                .state
+                .queue
+                .write_buffer(&element_buffer, 0, element_data);
+        }
 
-        Ok(Self { _server: server.weak_ref(), vertex_buffers: RefCell::new(vertex_buffers), vertex_buffer_layouts, element_buffer: RefCell::new(element_buffer), element_count: Cell::new(element_count), element_kind: desc.elements.element_kind() })
+        Ok(Self {
+            _server: server.weak_ref(),
+            vertex_buffers: RefCell::new(vertex_buffers),
+            vertex_buffer_layouts,
+            element_buffer: RefCell::new(element_buffer),
+            element_count: Cell::new(element_count),
+            element_kind: desc.elements.element_kind(),
+        })
     }
 
-    pub fn element_count(&self) -> usize { self.element_count.get() }
-    pub fn element_kind(&self) -> ElementKind { self.element_kind }
-    pub fn vertex_buffers(&self) -> std::cell::Ref<'_, Vec<wgpu::Buffer>> { self.vertex_buffers.borrow() }
-    pub fn vertex_buffer_layouts(&self) -> &[wgpu::VertexBufferLayout<'static>] { &self.vertex_buffer_layouts }
-    pub fn element_buffer(&self) -> std::cell::Ref<'_, wgpu::Buffer> { self.element_buffer.borrow() }
+    /// Returns the number of elements (triangles, lines, or points) in the index buffer.
+    pub fn element_count(&self) -> usize {
+        self.element_count.get()
+    }
+    /// Returns the type of elements stored in the index buffer.
+    pub fn element_kind(&self) -> ElementKind {
+        self.element_kind
+    }
+    /// Returns a borrow of the vertex buffer list.
+    pub fn vertex_buffers(&self) -> std::cell::Ref<'_, Vec<wgpu::Buffer>> {
+        self.vertex_buffers.borrow()
+    }
+    /// Returns the vertex buffer layout descriptors for all vertex buffers.
+    pub fn vertex_buffer_layouts(&self) -> &[wgpu::VertexBufferLayout<'static>] {
+        &self.vertex_buffer_layouts
+    }
+    /// Returns a borrow of the index (element) buffer.
+    pub fn element_buffer(&self) -> std::cell::Ref<'_, wgpu::Buffer> {
+        self.element_buffer.borrow()
+    }
+
+    /// Writes index data to the element buffer, recreating it if the new data is larger
+    /// than the current buffer capacity.
+    fn write_element_data(&self, count: usize, data: &[u8]) {
+        if let Some(server) = self._server.upgrade() {
+            self.element_count.set(count);
+            let mut eb = self.element_buffer.borrow_mut();
+            if (data.len() as u64) <= eb.size() {
+                server.state.queue.write_buffer(&eb, 0, data);
+            } else {
+                let new_buf = server.state.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: data.len() as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                server.state.queue.write_buffer(&new_buf, 0, data);
+                *eb = new_buf;
+            }
+        }
+    }
 }
 
 impl GpuGeometryBufferTrait for WgpuGeometryBuffer {
@@ -118,7 +214,6 @@ impl GpuGeometryBufferTrait for WgpuGeometryBuffer {
                 if (data.len() as u64) <= buf.size() {
                     server.state.queue.write_buffer(buf, 0, data);
                 } else {
-                    // Recreate buffer with correct size
                     let new_buf = server.state.device.create_buffer(&wgpu::BufferDescriptor {
                         label: None,
                         size: data.len() as u64,
@@ -131,59 +226,16 @@ impl GpuGeometryBufferTrait for WgpuGeometryBuffer {
             }
         }
     }
-    fn element_count(&self) -> usize { self.element_count.get() }
+    fn element_count(&self) -> usize {
+        self.element_count.get()
+    }
     fn set_triangles(&self, triangles: &[TriangleDefinition]) {
-        if let Some(server) = self._server.upgrade() {
-            self.element_count.set(triangles.len());
-            let data = array_as_u8_slice(triangles);
-            let mut eb = self.element_buffer.borrow_mut();
-            if (data.len() as u64) <= eb.size() {
-                server.state.queue.write_buffer(&eb, 0, data);
-            } else {
-                let new_buf = server.state.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: None, size: data.len() as u64,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                server.state.queue.write_buffer(&new_buf, 0, data);
-                *eb = new_buf;
-            }
-        }
+        self.write_element_data(triangles.len(), array_as_u8_slice(triangles));
     }
     fn set_lines(&self, lines: &[[u32; 2]]) {
-        if let Some(server) = self._server.upgrade() {
-            self.element_count.set(lines.len());
-            let data = array_as_u8_slice(lines);
-            let mut eb = self.element_buffer.borrow_mut();
-            if (data.len() as u64) <= eb.size() {
-                server.state.queue.write_buffer(&eb, 0, data);
-            } else {
-                let new_buf = server.state.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: None, size: data.len() as u64,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                server.state.queue.write_buffer(&new_buf, 0, data);
-                *eb = new_buf;
-            }
-        }
+        self.write_element_data(lines.len(), array_as_u8_slice(lines));
     }
     fn set_points(&self, points: &[u32]) {
-        if let Some(server) = self._server.upgrade() {
-            self.element_count.set(points.len());
-            let data = array_as_u8_slice(points);
-            let mut eb = self.element_buffer.borrow_mut();
-            if (data.len() as u64) <= eb.size() {
-                server.state.queue.write_buffer(&eb, 0, data);
-            } else {
-                let new_buf = server.state.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: None, size: data.len() as u64,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                server.state.queue.write_buffer(&new_buf, 0, data);
-                *eb = new_buf;
-            }
-        }
+        self.write_element_data(points.len(), array_as_u8_slice(points));
     }
 }

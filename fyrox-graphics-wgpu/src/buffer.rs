@@ -26,6 +26,10 @@ use fyrox_graphics::{
 use std::cell::Cell;
 use std::rc::Weak;
 
+/// Maps a Fyrox [`BufferKind`] to the corresponding wgpu [`BufferUsages`] flags.
+///
+/// All buffers additionally get `COPY_DST` to allow data uploads via `queue.write_buffer`.
+/// `PixelWrite` buffers also get `COPY_SRC` to allow copying to readback buffers.
 fn buffer_usage_to_wgpu(kind: BufferKind) -> wgpu::BufferUsages {
     let mut flags = match kind {
         BufferKind::Vertex => wgpu::BufferUsages::VERTEX,
@@ -41,6 +45,11 @@ fn buffer_usage_to_wgpu(kind: BufferKind) -> wgpu::BufferUsages {
     flags
 }
 
+/// Wgpu implementation of [`GpuBufferTrait`](fyrox_graphics::buffer::GpuBufferTrait).
+///
+/// Wraps a [`wgpu::Buffer`] and tracks its memory usage via [`ServerMemoryUsage`].
+/// Supports writing data larger than the buffer capacity (truncated with a warning)
+/// and synchronous GPU readback via mapped buffers.
 pub struct WgpuBuffer {
     server: Weak<WgpuGraphicsServer>,
     buffer: wgpu::Buffer,
@@ -50,13 +59,21 @@ pub struct WgpuBuffer {
 }
 
 impl WgpuBuffer {
+    /// Creates a new GPU buffer from the given descriptor.
+    ///
+    /// The buffer is created with at least 1 byte of capacity (wgpu requires non-zero size).
+    /// Memory usage is tracked on the server.
     pub fn new(
         server: &WgpuGraphicsServer,
         desc: GpuBufferDescriptor,
     ) -> Result<Self, FrameworkError> {
         let wgpu_usage = buffer_usage_to_wgpu(desc.kind);
         let buffer = server.state.device.create_buffer(&wgpu::BufferDescriptor {
-            label: if server.named_objects { Some(desc.name) } else { None },
+            label: if server.named_objects {
+                Some(desc.name)
+            } else {
+                None
+            },
             size: desc.size.max(1) as u64,
             usage: wgpu_usage,
             mapped_at_creation: false,
@@ -71,6 +88,7 @@ impl WgpuBuffer {
         })
     }
 
+    /// Returns a reference to the underlying [`wgpu::Buffer`].
     pub fn wgpu_buffer(&self) -> &wgpu::Buffer {
         &self.buffer
     }
@@ -85,20 +103,35 @@ impl Drop for WgpuBuffer {
 }
 
 impl GpuBufferTrait for WgpuBuffer {
-    fn usage(&self) -> BufferUsage { self.usage }
-    fn kind(&self) -> BufferKind { self.kind }
-    fn size(&self) -> usize { self.size.get() }
+    fn usage(&self) -> BufferUsage {
+        self.usage
+    }
+    fn kind(&self) -> BufferKind {
+        self.kind
+    }
+    fn size(&self) -> usize {
+        self.size.get()
+    }
 
     fn write_data(&self, data: &[u8]) -> Result<(), FrameworkError> {
-        if data.is_empty() { return Ok(()); }
+        if data.is_empty() {
+            return Ok(());
+        }
         let Some(server) = self.server.upgrade() else {
             return Err(FrameworkError::GraphicsServerUnavailable);
         };
         if data.len() <= self.size.get() {
             server.state.queue.write_buffer(&self.buffer, 0, data);
         } else {
-            log::warn!("WgpuBuffer::write_data: data ({} bytes) exceeds buffer ({} bytes)", data.len(), self.size.get());
-            server.state.queue.write_buffer(&self.buffer, 0, &data[..self.size.get()]);
+            log::warn!(
+                "WgpuBuffer::write_data: data ({} bytes) exceeds buffer ({} bytes)",
+                data.len(),
+                self.size.get()
+            );
+            server
+                .state
+                .queue
+                .write_buffer(&self.buffer, 0, &data[..self.size.get()]);
         }
         Ok(())
     }
@@ -109,9 +142,19 @@ impl GpuBufferTrait for WgpuBuffer {
         };
         let buffer_slice = self.buffer.slice(..data.len() as u64);
         let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| { tx.send(result).ok(); });
-        server.state.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
-        rx.recv().map_err(|_| FrameworkError::Custom("Channel closed".into()))?
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).ok();
+        });
+        server
+            .state
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
+        rx.recv()
+            .map_err(|_| FrameworkError::Custom("Channel closed".into()))?
             .map_err(|e| FrameworkError::Custom(format!("Buffer map failed: {e}")))?;
         let mapped = buffer_slice.get_mapped_range();
         data.copy_from_slice(&mapped);
