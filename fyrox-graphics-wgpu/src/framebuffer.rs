@@ -19,7 +19,7 @@
 // SOFTWARE.
 
 use crate::buffer::WgpuBuffer;
-use crate::format_helpers::{is_filterable_format, SAMPLER_BINDING_OFFSET, UNIFORM_BINDING_OFFSET};
+use crate::format_helpers::{is_filterable_format, is_integer_format, SAMPLER_BINDING_OFFSET, UNIFORM_BINDING_OFFSET};
 use crate::geometry_buffer::WgpuGeometryBuffer;
 use crate::program::WgpuProgram;
 use crate::sampler::WgpuSampler;
@@ -155,7 +155,7 @@ fn texture_format_for_attachment(tex: &GpuTexture) -> Option<wgpu::TextureFormat
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct PipelineKey {
     program_ptr: usize,
-    color_format: wgpu::TextureFormat,
+    color_formats: Vec<wgpu::TextureFormat>,
     depth_format: Option<wgpu::TextureFormat>,
     sample_count: u32,
     blend: bool,
@@ -228,7 +228,7 @@ impl WgpuFrameBuffer {
         program: &WgpuProgram,
         params: &DrawParameters,
         all_layouts: &[wgpu::VertexBufferLayout<'static>],
-        cf: wgpu::TextureFormat,
+        color_formats: &[wgpu::TextureFormat],
         df: Option<wgpu::TextureFormat>,
         pipeline_layout: &wgpu::PipelineLayout,
         element_kind: fyrox_graphics::ElementKind,
@@ -243,7 +243,7 @@ impl WgpuFrameBuffer {
         let effective_stencil = needs_stencil && stencil_supported;
         let key = PipelineKey {
             program_ptr: program as *const WgpuProgram as usize,
-            color_format: cf,
+            color_formats: color_formats.to_vec(),
             depth_format: df,
             sample_count: server.msaa_sample_count,
             blend: params.blend.is_some(),
@@ -369,16 +369,27 @@ impl WgpuFrameBuffer {
             fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
         };
 
-        let color_target = [Some(wgpu::ColorTargetState {
-            format: cf,
-            blend: blend_state,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
+        let color_targets: Vec<Option<wgpu::ColorTargetState>> = color_formats
+            .iter()
+            .map(|&format| {
+                let blend = if is_integer_format(format) {
+                    None
+                } else {
+                    blend_state.clone()
+                };
+
+                Some(wgpu::ColorTargetState {
+                    format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            })
+            .collect();
         let fragment_state = if has_color {
             Some(wgpu::FragmentState {
                 module: program.fragment_module(),
                 entry_point: Some("fs_main"),
-                targets: &color_target,
+                targets: &color_targets,
                 compilation_options: Default::default(),
             })
         } else {
@@ -498,12 +509,19 @@ impl WgpuFrameBuffer {
             None
         };
 
-        let cf = if self.is_backbuffer {
-            server.surface_config.read().unwrap().format
-        } else if let Some(fc) = self.color_attachments.first() {
-            texture_format_for_attachment(&fc.texture).unwrap_or(wgpu::TextureFormat::Rgba8Unorm)
+        // Collect color formats from ALL attachments (MRT support).
+        // For backbuffer: single format from surface config.
+        // For offscreen FBOs: one format per color attachment (e.g. G-Buffer has 5).
+        let color_formats: Vec<wgpu::TextureFormat> = if self.is_backbuffer {
+            vec![server.surface_config.read().unwrap().format]
         } else {
-            wgpu::TextureFormat::Rgba8Unorm
+            self.color_attachments
+                .iter()
+                .map(|a| {
+                    texture_format_for_attachment(&a.texture)
+                        .unwrap_or(wgpu::TextureFormat::Rgba8Unorm)
+                })
+                .collect()
         };
 
         let df = self
@@ -542,7 +560,7 @@ impl WgpuFrameBuffer {
             prog,
             params,
             &all_layouts,
-            cf,
+            &color_formats,
             df,
             &pipeline_layout,
             geo.element_kind(),
@@ -550,41 +568,47 @@ impl WgpuFrameBuffer {
         );
 
         let bind_group = create_bind_group(&server, prog, resources);
-        let mut encoder =
+
+        // Take or create frame encoder (batched: one encoder per frame, not per draw call).
+        let mut encoder = server.frame_encoder.borrow_mut().take().unwrap_or_else(|| {
             server
                 .state
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("DrawEnc"),
-                });
+                    label: Some("FrameEnc"),
+                })
+        });
 
-        let color_view = if self.is_backbuffer {
-            Some(surface_tex.expect("surface texture should be set for backbuffer"))
+        // Create views for ALL color attachments (MRT).
+        let color_views: Vec<wgpu::TextureView> = if self.is_backbuffer {
+            vec![surface_tex.expect("surface texture should be set for backbuffer")]
         } else {
-            self.color_attachments.first().map(|first_color| {
-                if let Some(face) = first_color.cube_map_face() {
-                    let wt = first_color
-                        .texture
-                        .as_any()
-                        .downcast_ref::<WgpuTexture>()
-                        .expect("color attachment should be WgpuTexture");
-                    wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_array_layer: cubemap_face_to_layer(face),
-                        array_layer_count: Some(1),
-                        mip_level_count: Some(1),
-                        ..Default::default()
-                    })
-                } else {
-                    first_color
-                        .texture
-                        .as_any()
-                        .downcast_ref::<WgpuTexture>()
-                        .expect("color attachment should be WgpuTexture")
-                        .wgpu_view()
-                        .clone()
-                }
-            })
+            self.color_attachments
+                .iter()
+                .map(|att| {
+                    if let Some(face) = att.cube_map_face() {
+                        let wt = att
+                            .texture
+                            .as_any()
+                            .downcast_ref::<WgpuTexture>()
+                            .expect("color attachment should be WgpuTexture");
+                        wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_array_layer: cubemap_face_to_layer(face),
+                            array_layer_count: Some(1),
+                            mip_level_count: Some(1),
+                            ..Default::default()
+                        })
+                    } else {
+                        att.texture
+                            .as_any()
+                            .downcast_ref::<WgpuTexture>()
+                            .expect("color attachment should be WgpuTexture")
+                            .wgpu_view()
+                            .clone()
+                    }
+                })
+                .collect()
         };
 
         let depth_view = self.depth_attachment.as_ref().map(|a| {
@@ -639,26 +663,26 @@ impl WgpuFrameBuffer {
                 } else {
                     (wgpu::LoadOp::Load, wgpu::LoadOp::Load, wgpu::LoadOp::Load)
                 };
-            let color_att = color_view
-                .as_ref()
-                .map(|view| wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: color_load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                });
-            let color_att_ref: &[Option<wgpu::RenderPassColorAttachment<'_>>] =
-                if color_att.is_some() {
-                    &[color_att]
-                } else {
-                    &[]
-                };
+
+            // Build color attachments for ALL render targets (MRT).
+            let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = color_views
+                .iter()
+                .map(|view| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: color_load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })
+                })
+                .collect();
+
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("DrawRP"),
-                color_attachments: color_att_ref,
+                color_attachments: &color_attachments,
                 depth_stencil_attachment: depth_view.as_ref().map(|v| {
                     wgpu::RenderPassDepthStencilAttachment {
                         view: v,
@@ -706,8 +730,11 @@ impl WgpuFrameBuffer {
             let end_idx = ((offset + count) * ipe) as u32;
             rp.draw_indexed(start_idx..end_idx, 0, 0..instance_count);
         }
+        // Render pass dropped here; encoder is free for next draw call.
 
-        server.state.queue.submit(std::iter::once(encoder.finish()));
+        // Return encoder to server for reuse by subsequent draw calls.
+        *server.frame_encoder.borrow_mut() = Some(encoder);
+
         Ok(DrawCallStatistics {
             triangles: count * instance_count as usize,
         })
@@ -746,6 +773,10 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
     }
     fn read_pixels(&self, read_target: ReadTarget) -> Option<Vec<u8>> {
         let server = self.server.upgrade()?;
+        // Flush any pending frame encoder so prior draws are submitted before readback.
+        if let Some(encoder) = server.frame_encoder.borrow_mut().take() {
+            server.state.queue.submit(std::iter::once(encoder.finish()));
+        }
         let texture = match read_target {
             ReadTarget::Depth | ReadTarget::Stencil => &self.depth_attachment.as_ref()?.texture,
             ReadTarget::Color(i) => &self.color_attachments.get(i)?.texture,

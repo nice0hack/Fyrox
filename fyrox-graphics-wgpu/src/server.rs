@@ -108,6 +108,10 @@ pub struct WgpuGraphicsServer {
     pub backbuffer_needs_clear: Cell<bool>,
     /// Cached depth-stencil texture for the backbuffer, with its (width, height).
     backbuffer_depth_stencil: RefCell<Option<(u32, u32, GpuTexture)>>,
+    /// Per-frame command encoder. Lazily created on first draw, submitted in swap_buffers.
+    /// Storing it on the server (not per-framebuffer) because multiple framebuffers
+    /// (G-Buffer, HDR, backbuffer) share the same frame and benefit from a single submit.
+    pub frame_encoder: RefCell<Option<wgpu::CommandEncoder>>,
 }
 
 impl WgpuGraphicsServer {
@@ -189,7 +193,7 @@ impl WgpuGraphicsServer {
             required_limits: if cfg!(target_arch = "wasm32") {
                 wgpu::Limits::downlevel_webgl2_defaults()
             } else {
-                wgpu::Limits::default()
+                adapter.limits()
             },
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
@@ -263,6 +267,7 @@ impl WgpuGraphicsServer {
             current_frame: RefCell::new(None),
             backbuffer_needs_clear: Cell::new(true),
             backbuffer_depth_stencil: RefCell::new(None),
+            frame_encoder: RefCell::new(None),
         });
 
         *server.weak_self.borrow_mut() = Some(Rc::downgrade(&server));
@@ -408,7 +413,11 @@ impl GraphicsServer for WgpuGraphicsServer {
         self.weak_ref() as Weak<dyn GraphicsServer>
     }
     fn flush(&self) {
-        self.state.queue.submit(std::iter::empty());
+        // flush in Fyrox means "send the accumulated commands to the video card right now."
+        // An empty submit is not needed here, just close and send the encoder, if there is one.
+        if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
+            self.state.queue.submit(std::iter::once(encoder.finish()));
+        }
     }
     fn finish(&self) {
         self.state
@@ -426,17 +435,33 @@ impl GraphicsServer for WgpuGraphicsServer {
         *self.pipeline_statistics.borrow()
     }
     fn swap_buffers(&self) -> Result<(), FrameworkError> {
+        // Submit all batched draw commands from this frame
+        if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
+            self.state.queue.submit(std::iter::once(encoder.finish()));
+        }
         if let Some(frame) = self.current_frame.borrow_mut().take() {
             frame.present();
         }
-        self.backbuffer_needs_clear.set(true);
+        self.backbuffer_needs_clear.replace(true);
         Ok(())
     }
     fn set_frame_size(&self, new_size: (u32, u32)) {
         if new_size.0 > 0 && new_size.1 > 0 {
             let mut config = self.surface_config.write().unwrap();
+
+            if config.width == new_size.0 && config.height == new_size.1 {
+                return;
+            }
+
             config.width = new_size.0;
             config.height = new_size.1;
+
+            if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
+                self.state.queue.submit(std::iter::once(encoder.finish()));
+            }
+
+            self.current_frame.borrow_mut().take();
+
             self.surface.configure(&self.state.device, &config);
         }
     }

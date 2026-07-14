@@ -482,7 +482,6 @@ impl Drop for WgpuTexture {
         if let Some(server) = self.server.upgrade() {
             server.memory_usage.borrow_mut().textures -= self.size_bytes.get();
         }
-        self.texture.destroy();
     }
 }
 

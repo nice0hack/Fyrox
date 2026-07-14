@@ -62,6 +62,31 @@ pub fn is_filterable_format(fmt: wgpu::TextureFormat) -> bool {
     )
 }
 
+/// Returns `true` if the given texture format is an integer format.
+///
+/// Hardware blending (e.g., alpha blending) relies on floating-point arithmetic.
+/// Integer formats (such as `R8Uint`, `R16Sint`, etc.) cannot be blended by the GPU.
+/// When configuring a [`wgpu::ColorTargetState`] for these formats, the `blend`
+/// field MUST be explicitly set to `None` to prevent `wgpu` validation errors.
+///
+/// # Examples
+///
+/// ```ignore
+/// use fyrox_graphics_wgpu::format_helpers::is_integer_format;
+///
+/// assert!(is_integer_format(wgpu::TextureFormat::R8Uint));
+/// assert!(!is_integer_format(wgpu::TextureFormat::Rgba8Unorm));
+/// ```
+pub fn is_integer_format(fmt: wgpu::TextureFormat) -> bool {
+    use wgpu::TextureFormat as F;
+    matches!(
+        fmt,
+        F::R8Uint | F::R8Sint | F::R16Uint | F::R16Sint | F::R32Uint | F::R32Sint |
+        F::Rg8Uint | F::Rg8Sint | F::Rg16Uint | F::Rg16Sint | F::Rg32Uint | F::Rg32Sint |
+        F::Rgba8Uint | F::Rgba8Sint | F::Rgba16Uint | F::Rgba16Sint | F::Rgba32Uint | F::Rgba32Sint
+    )
+}
+
 /// Returns the appropriate [`wgpu::TextureSampleType`] for the given texture format.
 ///
 /// Used when creating bind group layouts from actual texture formats rather than
