@@ -25,6 +25,7 @@ use crate::program::WgpuProgram;
 use crate::sampler::WgpuSampler;
 use crate::server::WgpuGraphicsServer;
 use crate::texture::WgpuTexture;
+use fyrox_core::log::Log;
 use fyrox_graphics::{
     core::{color::Color, math::Rect},
     error::FrameworkError,
@@ -186,6 +187,7 @@ pub struct WgpuFrameBuffer {
     needs_clear: Cell<bool>,
     pending_clear_color: RefCell<wgpu::Color>,
     pending_clear_depth: RefCell<f32>,
+    backbuffer_depth_cache: RefCell<Option<(u32, u32, wgpu::Texture)>>,
 }
 
 impl WgpuFrameBuffer {
@@ -203,6 +205,7 @@ impl WgpuFrameBuffer {
             needs_clear: Cell::new(false),
             pending_clear_color: RefCell::new(wgpu::Color::BLACK),
             pending_clear_depth: RefCell::new(1.0),
+            backbuffer_depth_cache: RefCell::new(None),
         })
     }
 
@@ -219,6 +222,7 @@ impl WgpuFrameBuffer {
             needs_clear: Cell::new(false),
             pending_clear_color: RefCell::new(wgpu::Color::BLACK),
             pending_clear_depth: RefCell::new(1.0),
+            backbuffer_depth_cache: RefCell::new(None),
         }
     }
 
@@ -471,8 +475,10 @@ impl WgpuFrameBuffer {
             return Ok(DrawCallStatistics { triangles: 0 });
         }
 
+        let mut current_width = 0;
+        let mut current_height = 0;
+
         let surface_tex = if self.is_backbuffer {
-            // Only acquire a new frame if one isn't already stored from a prior draw call this frame.
             if server.current_frame.borrow().is_none() {
                 match server.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
@@ -480,13 +486,13 @@ impl WgpuFrameBuffer {
                         *server.current_frame.borrow_mut() = Some(t);
                     }
                     wgpu::CurrentSurfaceTexture::Timeout => {
-                        log::warn!("Surface texture timeout, skipping frame");
+                        Log::warn("Surface texture timeout, skipping frame");
                         return Ok(DrawCallStatistics { triangles: 0 });
                     }
                     wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                         let config = server.surface_config.read().unwrap();
                         server.surface.configure(&server.state.device, &config);
-                        log::warn!("Surface lost/outdated, reconfigured");
+                        Log::warn("Surface lost/outdated, reconfigured");
                         return Ok(DrawCallStatistics { triangles: 0 });
                     }
                     other => {
@@ -496,12 +502,15 @@ impl WgpuFrameBuffer {
                     }
                 }
             }
-            // Create a view from the stored frame (doesn't consume the SurfaceTexture).
+
             let frame = server.current_frame.borrow();
+            let frame_ref = frame.as_ref().expect("frame should be Some after acquisition");
+
+            current_width = frame_ref.texture.size().width;
+            current_height = frame_ref.texture.size().height;
+
             Some(
-                frame
-                    .as_ref()
-                    .expect("frame should be Some after acquisition")
+                frame_ref
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default()),
             )
@@ -524,10 +533,13 @@ impl WgpuFrameBuffer {
                 .collect()
         };
 
-        let df = self
-            .depth_attachment
-            .as_ref()
-            .and_then(|a| texture_format_for_attachment(&a.texture));
+        let df = if self.is_backbuffer {
+            Some(wgpu::TextureFormat::Depth24PlusStencil8)
+        } else {
+            self.depth_attachment
+                .as_ref()
+                .and_then(|a| texture_format_for_attachment(&a.texture))
+        };
 
         // Collect actual texture formats from resources for layout creation
         let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
@@ -611,24 +623,55 @@ impl WgpuFrameBuffer {
                 .collect()
         };
 
-        let depth_view = self.depth_attachment.as_ref().map(|a| {
-            let wt = a
-                .texture
-                .as_any()
-                .downcast_ref::<WgpuTexture>()
-                .expect("depth attachment should be WgpuTexture");
-            if let Some(face) = a.cube_map_face() {
-                wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: cubemap_face_to_layer(face),
-                    array_layer_count: Some(1),
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                })
-            } else {
-                wt.wgpu_view().clone()
+        let depth_view = if self.is_backbuffer {
+            let mut backbuffer_depth_cache = self.backbuffer_depth_cache.borrow_mut();
+
+            let needs_recreate = match backbuffer_depth_cache.as_ref() {
+                Some((cw, ch, _)) => *cw != current_width || *ch != current_height,
+                None => true,
+            };
+
+            if needs_recreate && current_width > 0 && current_height > 0 {
+                let depth_texture = server.state.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("DynamicBackbufferDepth"),
+                    size: wgpu::Extent3d {
+                        width: current_width,
+                        height: current_height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: server.msaa_sample_count,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth24PlusStencil8,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                *backbuffer_depth_cache = Some((current_width, current_height, depth_texture));
             }
-        });
+
+            backbuffer_depth_cache
+                .as_ref()
+                .map(|(_, _, tex)| tex.create_view(&wgpu::TextureViewDescriptor::default()))
+        } else {
+            self.depth_attachment.as_ref().map(|a| {
+                let wt = a
+                    .texture
+                    .as_any()
+                    .downcast_ref::<WgpuTexture>()
+                    .expect("depth attachment should be WgpuTexture");
+                if let Some(face) = a.cube_map_face() {
+                    wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: cubemap_face_to_layer(face),
+                        array_layer_count: Some(1),
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                } else {
+                    wt.wgpu_view().clone()
+                }
+            })
+        };
 
         {
             // Backbuffer clears once per frame (flag set by swap_buffers, consumed on first draw).
