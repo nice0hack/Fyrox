@@ -22,6 +22,7 @@ members = [
     "fyrox-texture",
     "fyrox-autotile",
     "fyrox-material",
+    "fyrox-graphics-gl",
     "fyrox-graphics-wgpu"]
 resolver = "2"
 

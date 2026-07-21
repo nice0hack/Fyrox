@@ -42,6 +42,12 @@ use crate::{
 };
 use std::{any::TypeId, cell::RefCell, rc::Rc};
 
+#[cfg(feature = "backend_opengl")]
+const HIGHLIGHT_SHADER_SRC: &str = include_str!("../resources/shaders/opengl/highlight.shader");
+
+#[cfg(feature = "backend_wgpu")]
+const HIGHLIGHT_SHADER_SRC: &str = include_str!("../resources/shaders/wgpu/highlight.shader");
+
 pub struct HighlightRenderPass {
     framebuffer: GpuFrameBuffer,
     edge_detect_shader: RenderPassContainer,
@@ -79,7 +85,7 @@ impl HighlightRenderPass {
             framebuffer: Self::create_frame_buffer(server, width, height),
             edge_detect_shader: RenderPassContainer::from_str(
                 server,
-                include_str!("../resources/shaders/highlight.shader"),
+                HIGHLIGHT_SHADER_SRC,
             )
             .unwrap(),
             scene_handle: Default::default(),
