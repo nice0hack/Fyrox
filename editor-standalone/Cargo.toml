@@ -19,5 +19,5 @@ clap = { version = "4", features = ["derive"] }
 
 [features]
 default = ["backend_opengl"]
-backend_opengl = ["fyrox/backend_opengl", "fyroxed_base/backend_opengl"]
-backend_wgpu = ["fyrox/backend_wgpu", "fyroxed_base/backend_wgpu"]
+backend_opengl = ["fyroxed_base/backend_opengl"]
+backend_wgpu = ["fyroxed_base/backend_wgpu"]
