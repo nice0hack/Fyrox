@@ -75,6 +75,12 @@ pub struct WgpuState {
 /// identical pipelines across draw calls. The cache is stored in a [`RefCell<HashMap>`]
 /// and grows monotonically during the session.
 ///
+/// # Bind Group Cache
+///
+/// Bind groups are cached by a hash of resource pointers and texture formats to avoid
+/// recreating identical bind groups across draw calls. This is critical for performance
+/// since bind group creation is expensive.
+///
 /// # Backbuffer Lifecycle
 ///
 /// The backbuffer acquires a surface texture on the first draw call per frame.
@@ -94,6 +100,8 @@ pub struct WgpuGraphicsServer {
     pub msaa_sample_count: u32,
     /// Hash-based cache of render pipelines, keyed by [`PipelineKey`].
     pub pipeline_cache: RefCell<HashMap<u64, wgpu::RenderPipeline>>,
+    /// Hash-based cache of bind groups, keyed by resource pointers and texture formats.
+    pub bind_group_cache: RefCell<HashMap<u64, wgpu::BindGroup>>,
     weak_self: RefCell<Option<Weak<WgpuGraphicsServer>>>,
     /// Tracked GPU memory usage (buffers + textures).
     pub memory_usage: RefCell<ServerMemoryUsage>,
@@ -259,6 +267,7 @@ impl WgpuGraphicsServer {
             named_objects,
             msaa_sample_count: msaa,
             pipeline_cache: RefCell::new(HashMap::new()),
+            bind_group_cache: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(None),
             memory_usage: RefCell::new(ServerMemoryUsage::default()),
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),

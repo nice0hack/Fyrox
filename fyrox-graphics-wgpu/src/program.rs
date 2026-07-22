@@ -312,7 +312,13 @@ pub struct WgpuProgram {
     vertex_module: wgpu::ShaderModule,
     fragment_module: wgpu::ShaderModule,
     resources: Vec<ShaderResourceDefinition>,
-    cached_layouts: RefCell<Option<(wgpu::BindGroupLayout, wgpu::PipelineLayout)>>,
+    cached_layouts: RefCell<
+        Option<(
+            Vec<(usize, wgpu::TextureFormat)>,
+            wgpu::BindGroupLayout,
+            wgpu::PipelineLayout,
+        )>,
+    >,
 }
 
 impl GpuProgramTrait for WgpuProgram {}
@@ -394,8 +400,10 @@ impl WgpuProgram {
         &self,
         texture_formats: &[(usize, wgpu::TextureFormat)],
     ) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
-        if let Some((ref bgl, ref pl)) = *self.cached_layouts.borrow() {
-            return (bgl.clone(), pl.clone());
+        if let Some((ref cached_fmts, ref bgl, ref pl)) = *self.cached_layouts.borrow() {
+            if cached_fmts == texture_formats {
+                return (bgl.clone(), pl.clone());
+            }
         }
         let server = self
             .server
@@ -415,7 +423,7 @@ impl WgpuProgram {
                 ..Default::default()
             });
         let result = (bgl.clone(), pl.clone());
-        *self.cached_layouts.borrow_mut() = Some(result.clone());
+        *self.cached_layouts.borrow_mut() = Some((texture_formats.to_vec(), bgl, pl));
         result
     }
 

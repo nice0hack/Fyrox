@@ -151,8 +151,9 @@ fn texture_format_for_attachment(tex: &GpuTexture) -> Option<wgpu::TextureFormat
 /// Hashable key for the render pipeline cache.
 ///
 /// Encodes all state that affects pipeline creation: program identity, color/depth
-/// formats, sample count, blend/depth/stencil/cull mode, and the number of extra
-/// vertex buffer slots. Two draw calls with identical keys can share a pipeline.
+/// formats, sample count, blend/depth/stencil/cull mode, resource texture formats
+/// (which determine the bind group layout), and the number of extra vertex buffer
+/// slots. Two draw calls with identical keys can share a pipeline.
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct PipelineKey {
     program_ptr: usize,
@@ -166,6 +167,9 @@ pub struct PipelineKey {
     has_color: bool,
     cull: u8,
     extra_vert_count: u8,
+    /// Resource texture formats that determine the bind group layout.
+    /// Ensures pipeline is recreated when texture formats change (e.g., R32Float is non-filterable).
+    texture_resource_formats: Vec<(usize, wgpu::TextureFormat)>,
 }
 
 /// Wgpu implementation of [`GpuFrameBufferTrait`](fyrox_graphics::framebuffer::GpuFrameBufferTrait).
@@ -237,6 +241,7 @@ impl WgpuFrameBuffer {
         pipeline_layout: &wgpu::PipelineLayout,
         element_kind: fyrox_graphics::ElementKind,
         has_color: bool,
+        texture_resource_formats: &[(usize, wgpu::TextureFormat)],
     ) -> wgpu::RenderPipeline {
         let needs_stencil = params.stencil_test.is_some()
             || params.stencil_op.zpass != fyrox_graphics::StencilAction::Keep
@@ -245,6 +250,7 @@ impl WgpuFrameBuffer {
         let depth_fmt = df.unwrap_or(wgpu::TextureFormat::Depth32Float);
         let stencil_supported = format_has_stencil(depth_fmt);
         let effective_stencil = needs_stencil && stencil_supported;
+
         let key = PipelineKey {
             program_ptr: program as *const WgpuProgram as usize,
             color_formats: color_formats.to_vec(),
@@ -261,6 +267,7 @@ impl WgpuFrameBuffer {
                 None => 0,
             },
             extra_vert_count: all_layouts.len() as u8,
+            texture_resource_formats: texture_resource_formats.to_vec(),
         };
         let key_hash = {
             let mut h = DefaultHasher::new();
@@ -563,7 +570,7 @@ impl WgpuFrameBuffer {
                 }
             }
         }
-        let (_, pipeline_layout) = prog.get_or_create_layouts(&texture_formats);
+        let (_bind_group_layout, pipeline_layout) = prog.get_or_create_layouts(&texture_formats);
 
         let (all_layouts, extra_vert_count) = build_vertex_layouts(geo);
         let has_color = self.is_backbuffer || !self.color_attachments.is_empty();
@@ -577,6 +584,7 @@ impl WgpuFrameBuffer {
             &pipeline_layout,
             geo.element_kind(),
             has_color,
+            &texture_formats,
         );
 
         let bind_group = create_bind_group(&server, prog, resources);
@@ -1028,6 +1036,12 @@ fn create_bind_group(
 ) -> Option<wgpu::BindGroup> {
     let mut entries = Vec::new();
     let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
+
+    // Compute a cache key from all resource pointers and formats
+    let mut hasher = DefaultHasher::new();
+    // Include program identity in the hash
+    hasher.write_usize(program as *const WgpuProgram as usize);
+
     for group in groups {
         for binding in group.bindings {
             match binding {
@@ -1039,6 +1053,10 @@ fn create_bind_group(
                     let wt = texture.as_any().downcast_ref::<WgpuTexture>()?;
                     let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
                     texture_formats.push((*loc, wt.format()));
+                    // Hash the WgpuTexture and WgpuSampler thin pointers + format + binding
+                    hasher.write_usize(wt as *const WgpuTexture as usize);
+                    hasher.write_usize(ws as *const WgpuSampler as usize);
+                    hasher.write_u32(*loc as u32);
                     entries.push(wgpu::BindGroupEntry {
                         binding: *loc as u32,
                         resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()),
@@ -1059,16 +1077,24 @@ fn create_bind_group(
                     data_usage,
                 } => {
                     let wb = buffer.as_any().downcast_ref::<WgpuBuffer>()?;
+                    // Hash the WgpuBuffer thin pointer + binding + data usage
+                    hasher.write_usize(wb as *const WgpuBuffer as usize);
+                    hasher.write_u32(*loc as u32);
                     match data_usage {
-                        BufferDataUsage::UseEverything => entries.push(wgpu::BindGroupEntry {
-                            binding: (*loc + UNIFORM_BINDING_OFFSET) as u32,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wb.wgpu_buffer(),
-                                offset: 0,
-                                size: None,
-                            }),
-                        }),
+                        BufferDataUsage::UseEverything => {
+                            hasher.write_u64(0);
+                            entries.push(wgpu::BindGroupEntry {
+                                binding: (*loc + UNIFORM_BINDING_OFFSET) as u32,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: wb.wgpu_buffer(),
+                                    offset: 0,
+                                    size: None,
+                                }),
+                            });
+                        }
                         BufferDataUsage::UseSegment { offset, size } => {
+                            hasher.write_u64(*offset as u64);
+                            hasher.write_u64(*size as u64);
                             let nonzero_size = std::num::NonZeroU64::new(*size as u64)
                                 .expect("BufferDataUsage::UseSegment size must be non-zero");
                             entries.push(wgpu::BindGroupEntry {
@@ -1088,15 +1114,32 @@ fn create_bind_group(
     if entries.is_empty() {
         return None;
     }
+
+    let key = hasher.finish();
+
+    // Check cache first
+    {
+        let cache = server.bind_group_cache.borrow();
+        if let Some(bg) = cache.get(&key) {
+            return Some(bg.clone());
+        }
+    }
+
     let (bgl, _) = program.get_or_create_layouts(&texture_formats);
-    Some(
-        server
-            .state
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("BG"),
-                layout: &bgl,
-                entries: &entries,
-            }),
-    )
+    let bind_group = server
+        .state
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("BG"),
+            layout: &bgl,
+            entries: &entries,
+        });
+
+    // Store in cache
+    server
+        .bind_group_cache
+        .borrow_mut()
+        .insert(key, bind_group.clone());
+
+    Some(bind_group)
 }
