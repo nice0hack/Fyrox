@@ -595,7 +595,7 @@ impl WgpuFrameBuffer {
                 .state
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("FrameEnc"),
+                    label: None,
                 })
         });
 
@@ -849,7 +849,7 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
                     .state
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("ReadPxEnc"),
+                        label: None,
                     });
             enc.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {

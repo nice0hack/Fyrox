@@ -32,6 +32,7 @@ use fyrox_graphics::{
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Weak;
 
 /// Returns the WGSL texture type for a given sampler kind.
@@ -313,11 +314,10 @@ pub struct WgpuProgram {
     fragment_module: wgpu::ShaderModule,
     resources: Vec<ShaderResourceDefinition>,
     cached_layouts: RefCell<
-        Option<(
+        HashMap<
             Vec<(usize, wgpu::TextureFormat)>,
-            wgpu::BindGroupLayout,
-            wgpu::PipelineLayout,
-        )>,
+            (wgpu::BindGroupLayout, wgpu::PipelineLayout),
+        >,
     >,
 }
 
@@ -390,7 +390,7 @@ impl WgpuProgram {
             vertex_module: vert.module.clone(),
             fragment_module: frag.module.clone(),
             resources: resources.to_vec(),
-            cached_layouts: RefCell::new(None),
+            cached_layouts: RefCell::new(HashMap::new()),
         })
     }
 
@@ -400,20 +400,24 @@ impl WgpuProgram {
         &self,
         texture_formats: &[(usize, wgpu::TextureFormat)],
     ) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
-        if let Some((ref cached_fmts, ref bgl, ref pl)) = *self.cached_layouts.borrow() {
-            if cached_fmts == texture_formats {
-                return (bgl.clone(), pl.clone());
-            }
+
+        let mut cache = self.cached_layouts.borrow_mut();
+
+        if let Some((bgl, pl)) = cache.get(texture_formats) {
+            return (bgl.clone(), pl.clone());
         }
+
         let server = self
             .server
             .upgrade()
             .expect("WgpuGraphicsServer dropped before WgpuProgram");
+
         let bgl = create_bind_group_layout_with_formats(
             &server.state.device,
             &self.resources,
             texture_formats,
         );
+
         let pl = server
             .state
             .device
@@ -422,8 +426,11 @@ impl WgpuProgram {
                 bind_group_layouts: &[Some(&bgl)],
                 ..Default::default()
             });
+
         let result = (bgl.clone(), pl.clone());
-        *self.cached_layouts.borrow_mut() = Some((texture_formats.to_vec(), bgl, pl));
+
+        cache.insert(texture_formats.to_vec(), result.clone());
+
         result
     }
 

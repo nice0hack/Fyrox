@@ -110,7 +110,7 @@ impl GpuAsyncReadBufferTrait for WgpuAsyncReadBuffer {
                 .state
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("AsyncReadEnc"),
+                    label: None
                 });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
