@@ -1008,16 +1008,22 @@ const EXTRA_VERTEX_LAYOUTS: &[(u32, &[wgpu::VertexAttribute])] = &[
 /// on the server, so the shader reads valid (zeroed) data for missing attributes.
 fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayout<'static>>, u32) {
     let geo_layouts = geo.vertex_buffer_layouts();
-    let mut provided = std::collections::HashSet::new();
+
+    let mut provided_mask = 0u32;
     for layout in geo_layouts {
         for attr in layout.attributes {
-            provided.insert(attr.shader_location);
+            provided_mask |= 1 << attr.shader_location;
         }
     }
-    let mut all: Vec<wgpu::VertexBufferLayout<'static>> = geo_layouts.to_vec();
+
+    let mut all: Vec<wgpu::VertexBufferLayout<'static>> =
+        Vec::with_capacity(geo_layouts.len() + EXTRA_VERTEX_LAYOUTS.len());
+
+    all.extend_from_slice(geo_layouts);
+
     let mut extra = 0u32;
     for &(loc, attrs) in EXTRA_VERTEX_LAYOUTS {
-        if !provided.contains(&loc) {
+        if (provided_mask & (1 << loc)) == 0 {
             all.push(wgpu::VertexBufferLayout {
                 array_stride: 0,
                 step_mode: wgpu::VertexStepMode::Vertex,
@@ -1026,6 +1032,7 @@ fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayo
             extra += 1;
         }
     }
+
     (all, extra)
 }
 
