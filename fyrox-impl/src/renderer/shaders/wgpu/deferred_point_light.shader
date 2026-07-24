@@ -23,7 +23,7 @@
         ),
         (
             name: "pointShadowTexture",
-            kind: Texture(kind: DepthSamplerCube, fallback: White),
+            kind: Texture(kind: SamplerCube, fallback: White),
             binding: 4
         ),
         (
@@ -128,7 +128,7 @@
 
                         let distance_attenuation = S_LightDistanceAttenuation(dist, properties.lightRadius);
 
-                        let shadow = S_PointShadow_Depth(
+                        let shadow = S_PointShadow(
                             properties.shadowsEnabled != 0u, properties.softShadows != 0u, dist, properties.shadowBias, ctx.fragmentToLight, pointShadowTexture_tex, pointShadowTexture_samp);
                         let final_shadow = mix(1.0, shadow, properties.shadowAlpha);
 
