@@ -19,7 +19,7 @@
 // SOFTWARE.
 
 use crate::buffer::WgpuBuffer;
-use crate::format_helpers::{is_filterable_format, is_integer_format, SAMPLER_BINDING_OFFSET, UNIFORM_BINDING_OFFSET};
+use crate::format_helpers::{is_filterable_format, is_integer_format, sample_type_for_format, SAMPLER_BINDING_OFFSET, UNIFORM_BINDING_OFFSET};
 use crate::geometry_buffer::WgpuGeometryBuffer;
 use crate::program::WgpuProgram;
 use crate::sampler::WgpuSampler;
@@ -169,7 +169,7 @@ pub struct PipelineKey {
     extra_vert_count: u8,
     /// Resource texture formats that determine the bind group layout.
     /// Ensures pipeline is recreated when texture formats change (e.g., R32Float is non-filterable).
-    texture_resource_formats: Vec<(usize, wgpu::TextureFormat)>,
+    texture_resource_sample_types: Vec<(usize, wgpu::TextureSampleType)>,
 }
 
 /// Wgpu implementation of [`GpuFrameBufferTrait`](fyrox_graphics::framebuffer::GpuFrameBufferTrait).
@@ -251,6 +251,11 @@ impl WgpuFrameBuffer {
         let stencil_supported = format_has_stencil(depth_fmt);
         let effective_stencil = needs_stencil && stencil_supported;
 
+        let sample_types: Vec<_> = texture_resource_formats
+            .iter()
+            .map(|(loc, fmt)| (*loc, sample_type_for_format(*fmt)))
+            .collect();
+
         let key = PipelineKey {
             program_ptr: program as *const WgpuProgram as usize,
             color_formats: color_formats.to_vec(),
@@ -267,7 +272,7 @@ impl WgpuFrameBuffer {
                 None => 0,
             },
             extra_vert_count: all_layouts.len() as u8,
-            texture_resource_formats: texture_resource_formats.to_vec(),
+            texture_resource_sample_types: sample_types,
         };
         let key_hash = {
             let mut h = DefaultHasher::new();

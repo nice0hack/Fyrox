@@ -315,7 +315,7 @@ pub struct WgpuProgram {
     resources: Vec<ShaderResourceDefinition>,
     cached_layouts: RefCell<
         HashMap<
-            Vec<(usize, wgpu::TextureFormat)>,
+            Vec<(usize, wgpu::TextureSampleType)>,
             (wgpu::BindGroupLayout, wgpu::PipelineLayout),
         >,
     >,
@@ -400,10 +400,14 @@ impl WgpuProgram {
         &self,
         texture_formats: &[(usize, wgpu::TextureFormat)],
     ) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
+        let sample_types: Vec<_> = texture_formats
+            .iter()
+            .map(|(loc, fmt)| (*loc, sample_type_for_format(*fmt)))
+            .collect();
 
         let mut cache = self.cached_layouts.borrow_mut();
 
-        if let Some((bgl, pl)) = cache.get(texture_formats) {
+        if let Some((bgl, pl)) = cache.get(&sample_types) {
             return (bgl.clone(), pl.clone());
         }
 
@@ -429,7 +433,7 @@ impl WgpuProgram {
 
         let result = (bgl.clone(), pl.clone());
 
-        cache.insert(texture_formats.to_vec(), result.clone());
+        cache.insert(sample_types, result.clone());
 
         result
     }
