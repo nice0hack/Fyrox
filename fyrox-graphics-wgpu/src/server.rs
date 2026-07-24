@@ -47,6 +47,30 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, RwLock};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
+use fyrox_core::math::Rect;
+
+pub struct DrawCommand {
+    pub pipeline: wgpu::RenderPipeline,
+    pub bind_group: Option<wgpu::BindGroup>,
+    pub vertex_buffers: Vec<wgpu::Buffer>,
+    pub extra_verts: u32,
+    pub index_buffer: wgpu::Buffer,
+    pub viewport: Rect<i32>,
+    pub stencil_ref: Option<u32>,
+    pub start_idx: u32,
+    pub end_idx: u32,
+    pub instances: u32,
+}
+
+pub struct ActivePass {
+    pub framebuffer_id: usize,
+    pub color_views: Vec<wgpu::TextureView>,
+    pub depth_view: Option<wgpu::TextureView>,
+    pub color_load: wgpu::LoadOp<wgpu::Color>,
+    pub depth_load: wgpu::LoadOp<f32>,
+    pub stencil_load: wgpu::LoadOp<u32>,
+    pub commands: Vec<DrawCommand>,
+}
 
 /// Core wgpu objects shared across the server.
 ///
@@ -120,6 +144,7 @@ pub struct WgpuGraphicsServer {
     /// Storing it on the server (not per-framebuffer) because multiple framebuffers
     /// (G-Buffer, HDR, backbuffer) share the same frame and benefit from a single submit.
     pub frame_encoder: RefCell<Option<wgpu::CommandEncoder>>,
+    pub active_pass: RefCell<Option<ActivePass>>,
 }
 
 impl WgpuGraphicsServer {
@@ -277,6 +302,7 @@ impl WgpuGraphicsServer {
             backbuffer_needs_clear: Cell::new(true),
             backbuffer_depth_stencil: RefCell::new(None),
             frame_encoder: RefCell::new(None),
+            active_pass: RefCell::new(None),
         });
 
         *server.weak_self.borrow_mut() = Some(Rc::downgrade(&server));
@@ -296,6 +322,59 @@ impl WgpuGraphicsServer {
     /// [`SamplerBindingType::NonFiltering`](wgpu::SamplerBindingType::NonFiltering).
     pub fn non_filtering_sampler(&self) -> &wgpu::Sampler {
         &self.non_filtering_sampler
+    }
+
+    pub fn flush_active_pass(&self) {
+        let Some(pass) = self.active_pass.borrow_mut().take() else { return; };
+
+        let mut encoder = self.frame_encoder.borrow_mut().take().unwrap_or_else(|| {
+            self.state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+        });
+
+        let color_attachments: Vec<_> = pass.color_views.iter().map(|view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load: pass.color_load, store: wgpu::StoreOp::Store },
+            })
+        }).collect();
+
+        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: pass.depth_view.as_ref().map(|v| {
+                wgpu::RenderPassDepthStencilAttachment {
+                    view: v,
+                    depth_ops: Some(wgpu::Operations { load: pass.depth_load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: Some(wgpu::Operations { load: pass.stencil_load, store: wgpu::StoreOp::Store }),
+                }
+            }),
+            ..Default::default()
+        });
+
+        for cmd in pass.commands {
+            rp.set_viewport(cmd.viewport.x() as f32, cmd.viewport.y() as f32, cmd.viewport.w() as f32, cmd.viewport.h() as f32, 0.0, 1.0);
+            rp.set_pipeline(&cmd.pipeline);
+            if let Some(bg) = &cmd.bind_group {
+                rp.set_bind_group(0, bg, &[]);
+            }
+            if let Some(st) = cmd.stencil_ref {
+                rp.set_stencil_reference(st);
+            }
+            for (i, vb) in cmd.vertex_buffers.iter().enumerate() {
+                rp.set_vertex_buffer(i as u32, vb.slice(..));
+            }
+            let geo_buf_count = cmd.vertex_buffers.len() as u32;
+            for i in 0..cmd.extra_verts {
+                rp.set_vertex_buffer(geo_buf_count + i, self.dummy_vertex_buffer.slice(..));
+            }
+            rp.set_index_buffer(cmd.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(cmd.start_idx..cmd.end_idx, 0, 0..cmd.instances);
+        }
+
+        drop(rp);
+        *self.frame_encoder.borrow_mut() = Some(encoder);
     }
 }
 
@@ -424,6 +503,7 @@ impl GraphicsServer for WgpuGraphicsServer {
     fn flush(&self) {
         // flush in Fyrox means "send the accumulated commands to the video card right now."
         // An empty submit is not needed here, just close and send the encoder, if there is one.
+        self.flush_active_pass();
         if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
             self.state.queue.submit(std::iter::once(encoder.finish()));
         }
@@ -445,6 +525,7 @@ impl GraphicsServer for WgpuGraphicsServer {
     }
     fn swap_buffers(&self) -> Result<(), FrameworkError> {
         // Submit all batched draw commands from this frame
+        self.flush_active_pass();
         if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
             self.state.queue.submit(std::iter::once(encoder.finish()));
         }
@@ -465,6 +546,7 @@ impl GraphicsServer for WgpuGraphicsServer {
             config.width = new_size.0;
             config.height = new_size.1;
 
+            self.flush_active_pass();
             if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
                 self.state.queue.submit(std::iter::once(encoder.finish()));
             }

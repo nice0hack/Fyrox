@@ -454,164 +454,81 @@ impl WgpuFrameBuffer {
         resources: &[ResourceBindGroup],
         element_range: ElementRange,
     ) -> Result<DrawCallStatistics, FrameworkError> {
-        let server = self
-            .server
-            .upgrade()
-            .ok_or(FrameworkError::GraphicsServerUnavailable)?;
-        let geo = geometry
-            .as_any()
-            .downcast_ref::<WgpuGeometryBuffer>()
-            .ok_or_else(|| FrameworkError::Custom("Expected WgpuGeometryBuffer".into()))?;
-        let prog = program
-            .as_any()
-            .downcast_ref::<WgpuProgram>()
-            .ok_or_else(|| FrameworkError::Custom("Expected WgpuProgram".into()))?;
+        let server = self.server.upgrade().ok_or(FrameworkError::GraphicsServerUnavailable)?;
+        let geo = geometry.as_any().downcast_ref::<WgpuGeometryBuffer>().ok_or_else(|| FrameworkError::Custom("Expected WgpuGeometryBuffer".into()))?;
+        let prog = program.as_any().downcast_ref::<WgpuProgram>().ok_or_else(|| FrameworkError::Custom("Expected WgpuProgram".into()))?;
 
         let (offset, count) = match element_range {
             ElementRange::Full => (0, geo.element_count()),
             ElementRange::Specific { offset, count } => (offset, count),
         };
-        if offset + count > geo.element_count() {
-            return Err(FrameworkError::InvalidElementRange {
-                start: offset,
-                end: offset + count,
-                total: geo.element_count(),
-            });
-        }
-        if count == 0 {
-            return Ok(DrawCallStatistics { triangles: 0 });
-        }
+        if offset + count > geo.element_count() { return Err(FrameworkError::InvalidElementRange { start: offset, end: offset + count, total: geo.element_count() }); }
+        if count == 0 { return Ok(DrawCallStatistics { triangles: 0 }); }
 
-        let mut current_width = 0;
-        let mut current_height = 0;
-
-        let surface_tex = if self.is_backbuffer {
-            if server.current_frame.borrow().is_none() {
-                match server.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(t)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                        *server.current_frame.borrow_mut() = Some(t);
-                    }
-                    wgpu::CurrentSurfaceTexture::Timeout => {
-                        Log::warn("Surface texture timeout, skipping frame");
-                        return Ok(DrawCallStatistics { triangles: 0 });
-                    }
-                    wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                        let config = server.surface_config.read().unwrap();
-                        server.surface.configure(&server.state.device, &config);
-                        Log::warn("Surface lost/outdated, reconfigured");
-                        return Ok(DrawCallStatistics { triangles: 0 });
-                    }
-                    other => {
-                        return Err(FrameworkError::Custom(format!(
-                            "Surface texture error: {other:?}"
-                        )))
-                    }
-                }
-            }
-
-            let frame = server.current_frame.borrow();
-            let frame_ref = frame.as_ref().expect("frame should be Some after acquisition");
-
-            current_width = frame_ref.texture.size().width;
-            current_height = frame_ref.texture.size().height;
-
-            Some(
-                frame_ref
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default()),
-            )
-        } else {
-            None
-        };
-
-        // Collect color formats from ALL attachments (MRT support).
-        // For backbuffer: single format from surface config.
-        // For offscreen FBOs: one format per color attachment (e.g. G-Buffer has 5).
         let color_formats: Vec<wgpu::TextureFormat> = if self.is_backbuffer {
             vec![server.surface_config.read().unwrap().format]
         } else {
-            self.color_attachments
-                .iter()
-                .map(|a| {
-                    texture_format_for_attachment(&a.texture)
-                        .unwrap_or(wgpu::TextureFormat::Rgba8Unorm)
-                })
-                .collect()
+            self.color_attachments.iter().map(|a| texture_format_for_attachment(&a.texture).unwrap_or(wgpu::TextureFormat::Rgba8Unorm)).collect()
         };
+        let df = if self.is_backbuffer { Some(wgpu::TextureFormat::Depth24PlusStencil8) } else { self.depth_attachment.as_ref().and_then(|a| texture_format_for_attachment(&a.texture)) };
 
-        let df = if self.is_backbuffer {
-            Some(wgpu::TextureFormat::Depth24PlusStencil8)
-        } else {
-            self.depth_attachment
-                .as_ref()
-                .and_then(|a| texture_format_for_attachment(&a.texture))
-        };
-
-        // Collect actual texture formats from resources for layout creation
         let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
         for group in resources {
             for binding in group.bindings {
-                if let ResourceBinding::Texture {
-                    texture,
-                    binding: loc,
-                    ..
-                } = binding
-                {
-                    let wt = texture
-                        .as_any()
-                        .downcast_ref::<WgpuTexture>()
-                        .ok_or_else(|| {
-                            FrameworkError::Custom(
-                                "Expected WgpuTexture in resource binding".into(),
-                            )
-                        })?;
+                if let ResourceBinding::Texture { texture, binding: loc, .. } = binding {
+                    let wt = texture.as_any().downcast_ref::<WgpuTexture>().ok_or_else(|| FrameworkError::Custom("Expected WgpuTexture".into()))?;
                     texture_formats.push((*loc, wt.format()));
                 }
             }
         }
-        let (_bind_group_layout, pipeline_layout) = prog.get_or_create_layouts(&texture_formats);
 
+        let (_bind_group_layout, pipeline_layout) = prog.get_or_create_layouts(&texture_formats);
         let (all_layouts, extra_vert_count) = build_vertex_layouts(geo);
         let has_color = self.is_backbuffer || !self.color_attachments.is_empty();
-        let pipeline = self.get_or_create_pipeline(
-            &server,
-            prog,
-            params,
-            &all_layouts,
-            &color_formats,
-            df,
-            &pipeline_layout,
-            geo.element_kind(),
-            has_color,
-            &texture_formats,
-        );
 
+        let pipeline = self.get_or_create_pipeline(&server, prog, params, &all_layouts, &color_formats, df, &pipeline_layout, geo.element_kind(), has_color, &texture_formats);
         let bind_group = create_bind_group(&server, prog, resources);
 
-        // Take or create frame encoder (batched: one encoder per frame, not per draw call).
-        let mut encoder = server.frame_encoder.borrow_mut().take().unwrap_or_else(|| {
-            server
-                .state
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: None,
-                })
-        });
+        let fb_id = self as *const _ as usize;
+        let requires_new_pass = {
+            let pass = server.active_pass.borrow();
+            pass.is_none()
+                || pass.as_ref().unwrap().framebuffer_id != fb_id
+                || (self.is_backbuffer && server.backbuffer_needs_clear.get())
+                || (!self.is_backbuffer && self.needs_clear.get())
+        };
 
-        // Create views for ALL color attachments (MRT).
-        let color_views: Vec<wgpu::TextureView> = if self.is_backbuffer {
-            vec![surface_tex.expect("surface texture should be set for backbuffer")]
-        } else {
-            self.color_attachments
-                .iter()
-                .map(|att| {
+        if requires_new_pass {
+            server.flush_active_pass();
+
+            let mut current_width = 0;
+            let mut current_height = 0;
+
+            let surface_tex = if self.is_backbuffer {
+                if server.current_frame.borrow().is_none() {
+                    match server.surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                            *server.current_frame.borrow_mut() = Some(t);
+                        }
+                        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                            return Ok(DrawCallStatistics { triangles: 0 });
+                        }
+                        other => return Err(FrameworkError::Custom(format!("Surface texture error: {other:?}")))
+                    }
+                }
+                let frame = server.current_frame.borrow();
+                let frame_ref = frame.as_ref().unwrap();
+                current_width = frame_ref.texture.size().width;
+                current_height = frame_ref.texture.size().height;
+                Some(frame_ref.texture.create_view(&wgpu::TextureViewDescriptor::default()))
+            } else { None };
+
+            let color_views: Vec<wgpu::TextureView> = if self.is_backbuffer {
+                vec![surface_tex.unwrap()]
+            } else {
+                self.color_attachments.iter().map(|att| {
                     if let Some(face) = att.cube_map_face() {
-                        let wt = att
-                            .texture
-                            .as_any()
-                            .downcast_ref::<WgpuTexture>()
-                            .expect("color attachment should be WgpuTexture");
+                        let wt = att.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
                         wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
                             dimension: Some(wgpu::TextureViewDimension::D2),
                             base_array_layer: cubemap_face_to_layer(face),
@@ -620,171 +537,79 @@ impl WgpuFrameBuffer {
                             ..Default::default()
                         })
                     } else {
-                        att.texture
-                            .as_any()
-                            .downcast_ref::<WgpuTexture>()
-                            .expect("color attachment should be WgpuTexture")
-                            .wgpu_view()
-                            .clone()
+                        att.texture.as_any().downcast_ref::<WgpuTexture>().unwrap().wgpu_view().clone()
                     }
-                })
-                .collect()
-        };
-
-        let depth_view = if self.is_backbuffer {
-            let mut backbuffer_depth_cache = self.backbuffer_depth_cache.borrow_mut();
-
-            let needs_recreate = match backbuffer_depth_cache.as_ref() {
-                Some((cw, ch, _)) => *cw != current_width || *ch != current_height,
-                None => true,
+                }).collect()
             };
 
-            if needs_recreate && current_width > 0 && current_height > 0 {
-                let depth_texture = server.state.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("DynamicBackbufferDepth"),
-                    size: wgpu::Extent3d {
-                        width: current_width,
-                        height: current_height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: server.msaa_sample_count,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Depth24PlusStencil8,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                });
-                *backbuffer_depth_cache = Some((current_width, current_height, depth_texture));
-            }
-
-            backbuffer_depth_cache
-                .as_ref()
-                .map(|(_, _, tex)| tex.create_view(&wgpu::TextureViewDescriptor::default()))
-        } else {
-            self.depth_attachment.as_ref().map(|a| {
-                let wt = a
-                    .texture
-                    .as_any()
-                    .downcast_ref::<WgpuTexture>()
-                    .expect("depth attachment should be WgpuTexture");
-                if let Some(face) = a.cube_map_face() {
-                    wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_array_layer: cubemap_face_to_layer(face),
-                        array_layer_count: Some(1),
-                        mip_level_count: Some(1),
-                        ..Default::default()
-                    })
-                } else {
-                    wt.wgpu_view().clone()
+            let depth_view = if self.is_backbuffer {
+                let mut cache = self.backbuffer_depth_cache.borrow_mut();
+                if match cache.as_ref() {
+                    Some((cw, ch, _)) => *cw != current_width || *ch != current_height,
+                    None => true,
+                } && current_width > 0 && current_height > 0 {
+                    let depth_texture = server.state.device.create_texture(&wgpu::TextureDescriptor {
+                        label: None,
+                        size: wgpu::Extent3d { width: current_width, height: current_height, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: server.msaa_sample_count,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Depth24PlusStencil8,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    });
+                    *cache = Some((current_width, current_height, depth_texture));
                 }
-            })
-        };
-
-        {
-            // Backbuffer clears once per frame (flag set by swap_buffers, consumed on first draw).
-            // Offscreen FBOs clear when their clear() was called.
-            let has_stencil_aspect = df.map(format_has_stencil).unwrap_or(false);
-            let (color_load, depth_load, stencil_load) =
-                if self.is_backbuffer && server.backbuffer_needs_clear.replace(false) {
-                    (
-                        wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        wgpu::LoadOp::Clear(1.0),
-                        if has_stencil_aspect {
-                            wgpu::LoadOp::Clear(0)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                    )
-                } else if !self.is_backbuffer && self.needs_clear.replace(false) {
-                    (
-                        wgpu::LoadOp::Clear(*self.pending_clear_color.borrow()),
-                        wgpu::LoadOp::Clear(*self.pending_clear_depth.borrow()),
-                        if has_stencil_aspect {
-                            wgpu::LoadOp::Clear(0)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                    )
-                } else {
-                    (wgpu::LoadOp::Load, wgpu::LoadOp::Load, wgpu::LoadOp::Load)
-                };
-
-            // Build color attachments for ALL render targets (MRT).
-            let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = color_views
-                .iter()
-                .map(|view| {
-                    Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: color_load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })
+                cache.as_ref().map(|(_, _, tex)| tex.create_view(&wgpu::TextureViewDescriptor::default()))
+            } else {
+                self.depth_attachment.as_ref().map(|a| {
+                    let wt = a.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+                    if let Some(face) = a.cube_map_face() {
+                        wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_array_layer: cubemap_face_to_layer(face),
+                            array_layer_count: Some(1),
+                            mip_level_count: Some(1),
+                            ..Default::default()
+                        })
+                    } else { wt.wgpu_view().clone() }
                 })
-                .collect();
+            };
 
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("DrawRP"),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment: depth_view.as_ref().map(|v| {
-                    wgpu::RenderPassDepthStencilAttachment {
-                        view: v,
-                        depth_ops: Some(wgpu::Operations {
-                            load: depth_load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: Some(wgpu::Operations {
-                            load: stencil_load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                    }
-                }),
-                ..Default::default()
+            let has_stencil = df.map(format_has_stencil).unwrap_or(false);
+            let (color_load, depth_load, stencil_load) = if self.is_backbuffer && server.backbuffer_needs_clear.replace(false) {
+                (wgpu::LoadOp::Clear(wgpu::Color::BLACK), wgpu::LoadOp::Clear(1.0), if has_stencil { wgpu::LoadOp::Clear(0) } else { wgpu::LoadOp::Load })
+            } else if !self.is_backbuffer && self.needs_clear.replace(false) {
+                (wgpu::LoadOp::Clear(*self.pending_clear_color.borrow()), wgpu::LoadOp::Clear(*self.pending_clear_depth.borrow()), if has_stencil { wgpu::LoadOp::Clear(0) } else { wgpu::LoadOp::Load })
+            } else {
+                (wgpu::LoadOp::Load, wgpu::LoadOp::Load, wgpu::LoadOp::Load)
+            };
+
+            *server.active_pass.borrow_mut() = Some(crate::server::ActivePass {
+                framebuffer_id: fb_id,
+                color_views,
+                depth_view,
+                color_load,
+                depth_load,
+                stencil_load,
+                commands: Vec::new(),
             });
-
-            rp.set_viewport(
-                viewport.x() as f32,
-                viewport.y() as f32,
-                viewport.w() as f32,
-                viewport.h() as f32,
-                0.0,
-                1.0,
-            );
-            rp.set_pipeline(&pipeline);
-            if let Some(st) = &params.stencil_test {
-                rp.set_stencil_reference(st.ref_value);
-            }
-            if let Some(bg) = &bind_group {
-                rp.set_bind_group(0, bg, &[]);
-            }
-            let vbs = geo.vertex_buffers();
-            for (i, vb) in vbs.iter().enumerate() {
-                rp.set_vertex_buffer(i as u32, vb.slice(..));
-            }
-            let geo_buf_count = vbs.len() as u32;
-            for i in 0..extra_vert_count {
-                rp.set_vertex_buffer(geo_buf_count + i, server.dummy_vertex_buffer.slice(..));
-            }
-            let eb = geo.element_buffer();
-            rp.set_index_buffer(eb.slice(..), wgpu::IndexFormat::Uint32);
-
-            let ipe = geo.element_kind().index_per_element();
-            let start_idx = (offset * ipe) as u32;
-            let end_idx = ((offset + count) * ipe) as u32;
-            rp.draw_indexed(start_idx..end_idx, 0, 0..instance_count);
         }
-        // Render pass dropped here; encoder is free for next draw call.
 
-        // Return encoder to server for reuse by subsequent draw calls.
-        *server.frame_encoder.borrow_mut() = Some(encoder);
+        let ipe = geo.element_kind().index_per_element();
+
+        server.active_pass.borrow_mut().as_mut().unwrap().commands.push(crate::server::DrawCommand {
+            pipeline,
+            bind_group,
+            vertex_buffers: geo.vertex_buffers().iter().cloned().collect(),
+            extra_verts: extra_vert_count,
+            index_buffer: geo.element_buffer().clone(),
+            viewport,
+            stencil_ref: params.stencil_test.as_ref().map(|s| s.ref_value),
+            start_idx: (offset * ipe) as u32,
+            end_idx: ((offset + count) * ipe) as u32,
+            instances: instance_count,
+        });
 
         Ok(DrawCallStatistics {
             triangles: count * instance_count as usize,
@@ -824,6 +649,7 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
     }
     fn read_pixels(&self, read_target: ReadTarget) -> Option<Vec<u8>> {
         let server = self.server.upgrade()?;
+        server.flush_active_pass();
         // Flush any pending frame encoder so prior draws are submitted before readback.
         if let Some(encoder) = server.frame_encoder.borrow_mut().take() {
             server.state.queue.submit(std::iter::once(encoder.finish()));
